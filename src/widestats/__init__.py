@@ -8,6 +8,13 @@ from ._core import pick_device
 from .pairs import Pairs, cor_pairs
 from .perm import CorPerm, TTestPerm, cor_perm, ttest_perm
 
-__all__ = ["cor_pairs", "cor_perm", "ttest_perm", "Pairs", "CorPerm",
-           "TTestPerm", "pick_device"]
+__all__ = [
+           "CorPerm",
+           "Pairs",
+           "TTestPerm",
+           "cor_pairs",
+           "cor_perm",
+           "pick_device",
+           "ttest_perm",
+]
 __version__ = "0.1.0.dev0"

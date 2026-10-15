@@ -17,8 +17,15 @@ import numpy as np
 import torch
 from scipy import stats
 
-from ._core import (as_matrix, pick_device, pick_dtype, rank_columns,
-                    rounding_allowance, standardise, to_device)
+from ._core import (
+    as_matrix,
+    pick_device,
+    pick_dtype,
+    rank_columns,
+    rounding_allowance,
+    standardise,
+    to_device,
+)
 
 
 def _permutations(n: int, B: int, seed) -> torch.Tensor:

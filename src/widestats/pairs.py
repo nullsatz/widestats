@@ -11,8 +11,14 @@ import numpy as np
 import torch
 from scipy import stats
 
-from ._core import (as_matrix, pick_device, pick_dtype, rank_columns,
-                    standardise, to_device)
+from ._core import (
+    as_matrix,
+    pick_device,
+    pick_dtype,
+    rank_columns,
+    standardise,
+    to_device,
+)
 
 
 @dataclass
@@ -77,7 +83,6 @@ def cor_pairs(x, y=None, *, threshold=None, top=None, method="pearson",
         y = x if self_ else rank_columns(y)
     zx = to_device(standardise(x), dev, dt)
     zy = zx if self_ else to_device(standardise(y), dev, dt)
-    p, q = zx.shape[1], zy.shape[1]
 
     if threshold is not None:
         i, j, r = _threshold(zx, zy, self_, float(threshold), absolute,
