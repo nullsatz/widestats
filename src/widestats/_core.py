@@ -95,7 +95,8 @@ def as_matrix(x, name: str = "x") -> np.ndarray:
     Raises
     ------
     ValueError
-        If `x` has more than two dimensions or any missing (NaN) value.
+        If `x` has more than two dimensions or any missing (NaN) or
+        infinite value.
     """
     if isinstance(x, torch.Tensor):
         x = x.detach().cpu().numpy()
@@ -104,8 +105,8 @@ def as_matrix(x, name: str = "x") -> np.ndarray:
         x = x[:, None]
     if x.ndim != 2:
         raise ValueError(f"{name} must be a matrix (samples x variables)")
-    if np.isnan(x).any():
-        raise ValueError(f"{name} must have no missing values")
+    if not np.isfinite(x).all():
+        raise ValueError(f"{name} must have no missing or infinite values")
     return x
 
 

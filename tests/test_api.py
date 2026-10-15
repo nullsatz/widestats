@@ -176,3 +176,73 @@ def test_cor_perm_refuses_mismatched_and_tiny(x):
 def test_ttest_perm_refuses(x, group, kwargs, match):
     with pytest.raises(ValueError, match=match):
         ws.ttest_perm(x, group, **kwargs)
+
+
+# --- regressions from the code review --------------------------------------
+
+@pytest.mark.filterwarnings("ignore:Precision loss:RuntimeWarning")
+def test_ttest_perm_extreme_separation_in_float32():
+    # the groups differ by ~1e5 within-group sds: float32 cannot resolve the
+    # within-group variance, which once made p_perm NaN
+    rng = np.random.default_rng(20)
+    g = np.repeat([0, 1], 10)
+    x = (g + 1e-5 * rng.standard_normal(20))[:, None]
+    x = np.column_stack([x, rng.standard_normal((20, 3))])
+    res = ws.ttest_perm(x, g, B=999, seed=1, device="cpu", dtype="float32")
+    assert np.isfinite(res.p_perm).all()
+    assert res.p_perm[0] <= 3 / 1000 and res.p_adjusted[0] <= 3 / 1000
+    # the null features are unaffected
+    assert np.all(res.p_perm[1:] > 0.01)
+
+
+@pytest.mark.filterwarnings("ignore:Precision loss:RuntimeWarning")
+def test_ttest_perm_constant_within_groups():
+    g = np.repeat([0, 1], 6)
+    x = np.column_stack([g * 1.0, np.random.default_rng(21).normal(size=12)])
+    res = ws.ttest_perm(x, g, B=500, seed=2, device="cpu", dtype="float64")
+    assert np.isinf(res.statistic[0]) and res.p_value[0] == 0.0
+    # only the labellings that separate the groups as completely reach it:
+    # the observed one and its mirror, 2 of choose(12, 6) = 924
+    assert np.isfinite(res.p_perm[0]) and res.p_perm[0] < 0.02
+    assert res.p_adjusted[0] < 0.02
+
+
+@pytest.mark.filterwarnings("ignore:Precision loss:RuntimeWarning")
+def test_ttest_perm_constant_feature_has_no_test():
+    x = np.column_stack([np.full(10, 3.0),
+                         np.random.default_rng(22).normal(size=10)])
+    res = ws.ttest_perm(x, np.repeat([0, 1], 5), B=50, seed=3, device="cpu")
+    assert np.isnan(res.statistic[0])
+    assert np.isnan(res.p_perm[0]) and np.isnan(res.p_adjusted[0])
+    assert np.isfinite(res.p_perm[1])
+
+
+def test_unseeded_runs_leave_the_global_generator_alone(x):
+    torch.manual_seed(123)
+    want = torch.rand(3)
+    torch.manual_seed(123)
+    ws.cor_perm(x, B=5, device="cpu")
+    ws.ttest_perm(x, [0] * 10 + [1] * 10, B=5, device="cpu")
+    torch.testing.assert_close(torch.rand(3), want)
+
+
+def test_numpy_integer_seeds(x):
+    a = ws.cor_perm(x, B=20, seed=np.int64(3), device="cpu", dtype="float64")
+    b = ws.cor_perm(x, B=20, seed=3, device="cpu", dtype="float64")
+    np.testing.assert_array_equal(a.p_value, b.p_value)
+
+
+def test_permutations_are_permutations_for_large_n():
+    perms = _permutations(50_000, 3, seed=4).numpy()
+    for pm in perms:
+        assert np.array_equal(np.sort(pm), np.arange(50_000))
+
+
+def test_refuses_mixed_labels_and_infinities(x):
+    mixed = np.array([1, "a"] * 10, dtype=object)
+    with pytest.raises(ValueError, match="comparable"):
+        ws.ttest_perm(x, mixed)
+    y = x.copy()
+    y[0, 0] = np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        ws.cor_pairs(y, threshold=0.5)

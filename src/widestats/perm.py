@@ -55,12 +55,18 @@ from ._core import (
 def _permutations(n: int, B: int, seed) -> torch.Tensor:
     """Draw `B` random permutations of ``range(n)`` from `seed`.
 
-    Returns a ``(B, n)`` tensor on the CPU; with no `seed`, fresh entropy.
-    Sorting uniform draws gives each permutation with equal probability.
+    Returns a ``(B, n)`` tensor on the CPU. With no `seed`, fresh entropy
+    from the operating system: the caller's global torch generator is left
+    alone. Sorting uniform draws gives each permutation with equal
+    probability; the draws are float64, so that ties among them (which
+    would favour the original order) are vanishingly rare even for large
+    `n`, as float32's 2**24 values would not be.
     """
-    g = torch.Generator().manual_seed(seed if seed is not None
-                                      else int(torch.seed() % 2**63))
-    return torch.argsort(torch.rand(B, n, generator=g), dim=1)
+    if seed is None:
+        seed = np.random.SeedSequence().entropy
+    g = torch.Generator().manual_seed(int(seed) % 2**63)
+    return torch.argsort(torch.rand(B, n, generator=g, dtype=torch.float64),
+                         dim=1)
 
 
 def _adjust(observed: np.ndarray, maxima: np.ndarray, eps: float, B: int):
@@ -134,7 +140,7 @@ def cor_perm(x, y=None, *, B=1000, method="pearson", seed=None,
     Parameters
     ----------
     x : array_like, shape (n_samples, p)
-        The variables, one per column, with no missing values.
+        The variables, one per column, with no missing or infinite values.
     y : array_like, shape (n_samples, q), optional
         A second set of variables, the same samples in the same rows.
     B : int
@@ -145,7 +151,7 @@ def cor_perm(x, y=None, *, B=1000, method="pearson", seed=None,
         Seeds the permutations, for reproducible p-values.
     batch : int, optional
         How many permutations to compute at once; by default as many as fit
-        in about 256 MB. It has no effect on the result.
+        in a few hundred MB. It has no effect on the result.
     device : str or torch.device, optional
         Where to compute; by default the first available of CUDA, MPS and
         the CPU.
@@ -160,8 +166,8 @@ def cor_perm(x, y=None, *, B=1000, method="pearson", seed=None,
     Raises
     ------
     ValueError
-        If `B` is not a positive whole number, or the data have missing
-        values or fewer than 3 rows.
+        If `B` is not a positive whole number, or the data have missing or
+        infinite values or fewer than 3 rows.
 
     See Also
     --------
@@ -226,7 +232,8 @@ def cor_perm(x, y=None, *, B=1000, method="pearson", seed=None,
 
     perms = _permutations(n, B, seed).to(dev)
     if batch is None:
-        batch = max(1, (1 << 26) // max(1, p * q + n * q))
+        # a batch holds a few b x p x q intermediates: 16M entries each
+        batch = max(1, (1 << 24) // max(1, p * q + n * q))
     for b0 in range(0, B, batch):
         pb = perms[b0:b0 + batch]                       # b x n
         rb = zx.T @ zy[pb]                              # b x p x q
@@ -266,8 +273,11 @@ class TTestPerm:
         With ``B > 0``, the maxT adjusted p-value, for testing every
         feature at once.
 
-    A constant feature, or one constant within both groups, has no test:
-    its statistic is NaN, as are its p-values.
+    A constant feature has no test: its statistic and p-values are NaN. A
+    feature constant within each group but differing between them has an
+    infinite statistic and a p-value of 0, as SciPy gives them, and its
+    permutation p-value counts the labellings that separate the groups as
+    completely.
     """
 
     mean1: np.ndarray
@@ -297,7 +307,7 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     ----------
     x : array_like, shape (n_samples, n_features)
         The data, a row per sample (cell, patient, ...), a column per
-        feature (gene, ...), with no missing values.
+        feature (gene, ...), with no missing or infinite values.
     group : array_like, shape (n_samples,)
         Each sample's group: exactly two distinct labels, at least two
         samples each. The first label in sorted order is group 1.
@@ -310,7 +320,7 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         Seeds the permutations, for reproducible p-values.
     batch : int, optional
         How many labellings to compute at once; by default as many as fit
-        in about 128 MB. It has no effect on the result.
+        in a few hundred MB. It has no effect on the result.
     device : str or torch.device, optional
         Where to compute the permutations; by default the first available
         of CUDA, MPS and the CPU.
@@ -327,7 +337,7 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     ValueError
         If `group` does not have one entry per sample and exactly two
         labels with at least two samples each, `B` is negative, or the
-        data have missing values.
+        data have missing or infinite values.
 
     See Also
     --------
@@ -340,8 +350,16 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     samples 0/1 indicator matrix; group 2's follow from the totals. So all
     the permutations' t statistics come from two matrix products, a batch
     of labellings at a time. Each feature is first centred and scaled,
-    which changes no t, so that its sums of squares do not cancel in
-    float32.
+    which changes no t.
+
+    A within-group sum of squares is found as a difference of sums, which
+    cancels when the groups differ by thousands of within-group standard
+    deviations: float32 then cannot resolve the within-group variance. A
+    variance that comes out 0 while the means differ is taken as an
+    infinite t, so that such a labelling counts as reaching the observed
+    one; this errs on the conservative side. For features this strongly
+    separated the parametric p-value is beyond doubt anyway; use
+    ``dtype="float64"`` if their permutation p-values must be exact.
 
     Examples
     --------
@@ -360,7 +378,11 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     group = np.asarray(group)
     if group.shape != (n,):
         raise ValueError("group must have one entry per row of x")
-    levels = np.unique(group)
+    try:
+        levels = np.unique(group)
+    except TypeError:
+        raise ValueError("group's labels must be comparable (all numbers "
+                         "or all strings)") from None
     if len(levels) != 2:
         raise ValueError("group must have exactly two levels")
     in1 = group == levels[0]
@@ -381,8 +403,9 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     dev = pick_device(device)
     dt = pick_dtype(dtype, dev)
     eps = rounding_allowance(dt)
-    # centring and scaling each feature changes no t, and keeps the sums of
-    # squares in float32 from cancelling (a constant feature becomes NaN)
+    # centring and scaling each feature changes no t and keeps its sums of
+    # squares near 1 (a constant feature becomes NaN); see Notes on
+    # extreme separation, where float32 cannot resolve them anyway
     sd = x.std(axis=0, ddof=1)
     with np.errstate(invalid="ignore", divide="ignore"):
         z = (x - x.mean(axis=0)) / sd
@@ -415,7 +438,18 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
             se2 = v * (1 / n1 + 1 / n2)
         else:
             se2 = ss1 / (n1 - 1) / n1 + ss2 / (n2 - 1) / n2
-        return torch.where(se2 > 0, (m1 - m2) / se2.sqrt(), torch.nan)
+        # A within-group variance that comes out 0 while the means differ
+        # is one too small for the precision to resolve beside the
+        # difference (or exactly 0: a feature constant within each group).
+        # Its t is enormous, so take it as infinite: a labelling separating
+        # the groups that completely then counts as reaching the observed
+        # one, which is conservative. With equal means as well there is no
+        # test (NaN).
+        diff = m1 - m2
+        # (a constant feature, scaled, is NaN: its diff is NaN, no test)
+        t = torch.where(diff > 0, torch.inf, -torch.inf)
+        t = torch.where((diff == 0) | diff.isnan(), torch.nan, t)
+        return torch.where(se2 > 0, diff / se2.sqrt(), t)
 
     # the observed t is recomputed here, in the device's precision, so that
     # the permuted ones are compared with it on equal terms
@@ -425,7 +459,8 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     counts = torch.zeros(p, dtype=torch.int64, device=dev)
     maxima = torch.empty(B, dtype=torch.float64)
     if batch is None:
-        batch = max(1, (1 << 25) // p)
+        # a batch holds about ten b x p intermediates: 8M entries each
+        batch = max(1, (1 << 23) // p)
     for b0 in range(1, B + 1, batch):
         tb = tstat(labels[b0:b0 + batch]).abs()
         tb = torch.where(usable & ~torch.isnan(tb), tb, 0)

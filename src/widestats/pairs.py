@@ -88,7 +88,7 @@ def cor_pairs(x, y=None, *, threshold=None, top=None, method="pearson",
     Parameters
     ----------
     x : array_like, shape (n_samples, p)
-        The variables, one per column, with no missing values.
+        The variables, one per column, with no missing or infinite values.
     y : array_like, shape (n_samples, q), optional
         A second set of variables, the same samples in the same rows. If
         omitted, the columns of `x` are paired with each other.
@@ -133,7 +133,7 @@ def cor_pairs(x, y=None, *, threshold=None, top=None, method="pearson",
     ------
     ValueError
         If both or neither of `threshold` and `top` are given, the data
-        have missing values or fewer than 3 rows, or more than `limit`
+        have missing or infinite values or fewer than 3 rows, or more than `limit`
         pairs pass the threshold.
 
     See Also
