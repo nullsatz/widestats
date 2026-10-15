@@ -1,6 +1,8 @@
-"""widestats against NumPy and SciPy: the same pairs, correlations, t tests
-and permutation p-values, on the CPU in float64 and float32 and on whatever
-GPU is present."""
+"""widestats against NumPy and SciPy.
+
+The same pairs, correlations, t tests and permutation p-values, on the CPU
+in float64 and float32 and on whatever GPU is present.
+"""
 
 import numpy as np
 import pytest
