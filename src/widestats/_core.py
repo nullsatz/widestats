@@ -10,6 +10,8 @@ the precision it computes in.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import torch
 
@@ -26,9 +28,16 @@ def pick_device(device=None) -> torch.device:
     Returns
     -------
     torch.device
-        `device`, or if it is None the first available of CUDA (NVIDIA
+        `device`, or if it is None the first that works of CUDA (NVIDIA
         GPUs, and AMD GPUs under ROCm builds of PyTorch), MPS (Apple GPUs)
         and the CPU.
+
+    Notes
+    -----
+    A GPU counts as working if PyTorch reports it available *and* a tiny
+    computation on it succeeds: in a virtual machine (a CI runner, a
+    remote desktop) PyTorch can report an Apple GPU that cannot allocate
+    a byte.
 
     Examples
     --------
@@ -38,11 +47,32 @@ def pick_device(device=None) -> torch.device:
     """
     if device is not None:
         return torch.device(device)
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and device_works("cuda"):
         return torch.device("cuda")
-    if torch.backends.mps.is_available():
+    if torch.backends.mps.is_available() and device_works("mps"):
         return torch.device("mps")
     return torch.device("cpu")
+
+
+@functools.cache
+def device_works(kind: str) -> bool:
+    """Check that a tiny computation on a device of this kind succeeds.
+
+    Parameters
+    ----------
+    kind : str
+        A device type, such as ``"cuda"`` or ``"mps"``.
+
+    Returns
+    -------
+    bool
+        Whether a one-element tensor can be made and used there; False
+        for a device PyTorch reports but cannot use. Cached per kind.
+    """
+    try:
+        return bool((torch.ones(1, device=kind) + 1).cpu().item() == 2)
+    except (RuntimeError, AssertionError):
+        return False
 
 
 def pick_dtype(dtype, device: torch.device) -> torch.dtype:

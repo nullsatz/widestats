@@ -115,7 +115,22 @@ def test_as_matrix_refuses_more_than_two_dimensions():
 def test_pick_device_prefers_cuda_then_mps(monkeypatch, cuda, mps, want):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+    monkeypatch.setattr(_core, "device_works", lambda kind: True)
     assert _core.pick_device().type == want
+
+
+def test_pick_device_skips_a_reported_gpu_that_does_not_work(monkeypatch):
+    # as on a CI virtual machine: MPS reported, unable to allocate
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    monkeypatch.setattr(_core, "device_works", lambda kind: kind != "mps")
+    assert _core.pick_device().type == "cpu"
+
+
+def test_device_works():
+    assert _core.device_works("cpu")
+    # a device type this build of PyTorch cannot use at all
+    assert not _core.device_works("xla")
 
 
 @pytest.mark.parametrize("given,want", [(None, torch.float32),
