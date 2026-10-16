@@ -30,6 +30,8 @@ and the CPU, choosing the first available; pass `device=` and
 | `cor_pairs` | the strongly correlated pairs, every pair over a threshold or each variable's top k, Pearson or Spearman | `np.corrcoef` then a search, without forming the matrix |
 | `cor_perm` | permutation p-values of every correlation, and Westfall-Young maxT adjusted ones | the same permutations through `np.corrcoef` |
 | `ttest_perm` | Welch's or Student's t test of every feature between two groups, with permutation and maxT p-values | `scipy.stats.ttest_ind`, and the same permutations through it |
+| `granger` | Granger causality F tests for every ordered pair of time series | statsmodels' `grangercausalitytests` (`ssr_ftest`), pair by pair |
+| `mutual_info` | B-spline mutual information (Daub et al. 2004) of every pair, which detects any dependence, not only correlation | the estimator from the paper, pair by pair |
 
 These are the functions of the R package
 [gputools](https://github.com/nullsatz/gputools) that Python lacks on a GPU:
@@ -55,10 +57,9 @@ device.
 
 ## Status
 
-Early: the three functions above agree with NumPy and SciPy, and the
-permutation tests with the same permutations done by SciPy (see `tests/`);
-not yet benchmarked or released. Next: Granger causality tests for every pair
-of series and B-spline mutual information (Daub et al. 2004), then
+Early: every function agrees with an independent reference (NumPy, SciPy,
+statsmodels, or the published method written out; see `tests/`), on the
+CPU, Apple GPUs and CUDA; not yet benchmarked or released. Next:
 benchmarks against the best CPU code, and a guide to the data sizes where
 the GPU pays off.
 

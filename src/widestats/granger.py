@@ -11,6 +11,7 @@ small ``L x L`` solve per pair.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,6 +57,27 @@ class Granger:
     df: tuple[int, int]
 
 
+def _orthonormal_columns(a: torch.Tensor) -> torch.Tensor:
+    """Orthonormalise the few columns of each matrix in a batch.
+
+    Classical Gram-Schmidt applied twice to each column ("twice is
+    enough": orthonormal to working precision), for ``(b, T, m)`` with `m`
+    small. It does what a reduced QR does here, with only batched products,
+    on any device: PyTorch's QR on Apple GPUs (mps) builds a full ``T x T``
+    Q, gigabytes per matrix for long series. A column with nothing left
+    after the earlier ones (a constant series) becomes NaN.
+    """
+    m = a.shape[2]
+    cols = []
+    for k in range(m):
+        v = a[:, :, k]
+        for _ in range(2):
+            for u in cols:
+                v = v - u * (u * v).sum(dim=1, keepdim=True)
+        cols.append(v / torch.linalg.vector_norm(v, dim=1, keepdim=True))
+    return torch.stack(cols, dim=2)
+
+
 def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     """Test every series for Granger causality of every other.
 
@@ -95,6 +117,12 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         for it (fewer than ``3 * lag + 2`` times), or the data have missing
         or infinite values.
 
+    Warns
+    -----
+    RuntimeWarning
+        If some pairs could not be resolved in the precision computed in
+        (see Notes); their tests are NaN.
+
     Notes
     -----
     With ``T = n - lag`` usable times, the restricted model of effect ``j``
@@ -102,15 +130,21 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     ``F = ((RSS_r - RSS_u) / lag) / (RSS_u / (T - 2 * lag - 1))``.
 
     By the Frisch-Waugh theorem, ``RSS_r - RSS_u = g' G^{-1} g``, where,
-    after projecting the effect's intercept and own lags (the matrix
-    ``Q_j``, from a QR decomposition) out of everything, ``g = L_i' e_j``
-    is the cause's lags against the effect's residual and ``G = L_i' L_i -
-    (Q_j' L_i)' (Q_j' L_i)`` the cause's residual cross-products. ``L_i'
-    e_j`` for all pairs is one matrix product, and so is ``Q_j' L_i``. The
-    ``lag x lag`` systems, one per pair, are formed and solved in float64
-    as a batch on the device (CUDA, CPU), or on the CPU for Apple GPUs,
-    which have no float64. Each series is first centred and scaled, which
-    changes no F.
+    after projecting the effect's restricted design ``[1, own lags]`` (an
+    orthonormal basis ``Q_j`` of it, by Gram-Schmidt) out of everything,
+    ``g = L_i' e_j`` is the cause's lags against the effect's residual and
+    ``G = L_i' L_i - (Q_j' L_i)' (Q_j' L_i)`` the cause's residual
+    cross-products. ``L' e`` for all pairs is one matrix product, and so is
+    ``Q_j' L``; the ``lag x lag`` systems are formed and solved in float64
+    as a batch, on the device where it can (CUDA, CPU) or on the CPU for
+    Apple GPUs, which have no float64. Each series is first centred and
+    scaled, which changes no F.
+
+    A cause whose lags are almost exactly a linear function of the effect's
+    own past (nearly a copy of the effect) leaves residual cross-products
+    too small to resolve beside ``L'L`` in the precision computed in: such
+    pairs are NaN, with a warning. float32 resolves a residual variance down
+    to about 1e-4 of the cause's, float64 to about 1e-10.
 
     A series is not tested against itself (its lags are already in the
     restricted model), and a constant series has no tests: NaN.
@@ -170,36 +204,57 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     g0 = torch.from_numpy(np.einsum("tik,til->ikl", lx64, lx64)).to(solve_dev)
 
     if tile is None:
-        tile = max(1, (1 << 24) // max(1, p * lag * (2 * lag + 1)))
+        # a tile holds b x T x (L+1) designs and b x (L+1) x p*L products
+        tile = max(1, (1 << 24) // max(1, p * lag * (2 * lag + 1),
+                                       times * (lag + 1)))
     gain = torch.empty((p, q), dtype=torch.float64)
     rss_r = torch.empty(q, dtype=torch.float64)
+    weak = torch.zeros((p, q), dtype=torch.bool)
+    tol = 1e-10 if dt == torch.float64 else 1e-4
     ones = torch.ones((times, 1), device=dev, dtype=dt)
     for j0 in range(0, q, tile):
         j1 = min(j0 + tile, q)
-        # each effect's restricted design, [1, own lags], orthonormalised
-        design = torch.cat([ones.expand(j1 - j0, times, 1),
-                            ly[:, j0:j1].permute(1, 0, 2)], dim=2)
-        qmat = torch.linalg.qr(design).Q                       # b x T x (L+1)
-        yb = target[:, j0:j1].T                                # b x T
+        b = j1 - j0
+        # each effect's restricted design D = [1, own lags], orthonormalised
+        design = torch.cat([ones.expand(b, times, 1),
+                            ly[:, j0:j1].permute(1, 0, 2)], dim=2)  # b x T x m
+        qmat = _orthonormal_columns(design)                        # b x T x m
+        yb = target[:, j0:j1].T                                     # b x T
         resid = yb - (qmat @ (qmat.transpose(1, 2) @ yb[:, :, None]))[:, :, 0]
         rss_r[j0:j1] = (resid * resid).sum(dim=1).cpu().to(torch.float64)
-        # cause lags against effect residuals: L' e (the residual is already
-        # orthogonal to Q_j, so nothing of Q_j' L enters g)
-        g = (lx.T @ resid.T).reshape(p, lag, j1 - j0).permute(2, 0, 1)
-        c = (qmat.transpose(1, 2) @ lx).reshape(j1 - j0, lag + 1, p, lag)
+        # cause lags against effect residuals: g = L' e (the residual is
+        # already orthogonal to Q_j, so nothing of Q_j' L enters g)
+        g = (lx.T @ resid.T).reshape(p, lag, b).permute(2, 0, 1)
+        c = (qmat.transpose(1, 2) @ lx).reshape(b, lag + 1, p, lag)
         # to the CPU first when float64 is not on the device (mps)
+        g = g.to(solve_dev).to(torch.float64)                       # b x p x L
         c = c.to(solve_dev).to(torch.float64)
-        g = g.to(solve_dev).to(torch.float64)
-        gmat = g0[None] - torch.einsum("bcik,bcil->bikl", c, c)
+        # the causes' residual cross-products G = L'L - (Q'L)'(Q'L)
+        gmat = g0[None] - torch.einsum("bcik,bcil->bikl", c, c)    # b x p x L x L
         sol, info = torch.linalg.solve_ex(gmat, g[..., None])
-        gb = (g * sol[..., 0]).sum(dim=2)                      # b x p
-        gb = torch.where(info == 0, gb, torch.nan)             # singular G
+        gb = (g * sol[..., 0]).sum(dim=2)                           # b x p
+        # A cause whose lags are almost a linear function of the effect's
+        # own past leaves residual cross-products too small to resolve in
+        # this precision beside L'L: G and the gain would be rounding noise.
+        resolved = (torch.diagonal(gmat, dim1=2, dim2=3)
+                    / torch.diagonal(g0, dim1=1, dim2=2)[None]).amin(dim=2)
+        weak[:, j0:j1] = (resolved < tol).T.cpu()
+        gb = torch.where((info == 0) & (resolved >= tol), gb, torch.nan)
         gain[:, j0:j1] = gb.T.cpu()
 
     rss_r = rss_r.numpy()
     gain = gain.numpy()
+    weak = weak.numpy()
     if self_:
         np.fill_diagonal(gain, np.nan)
+        np.fill_diagonal(weak, False)       # not a test anyway
+    if weak.any():
+        warnings.warn(
+            f"{int(weak.sum())} pair(s) have a cause almost exactly a linear "
+            "function of the effect's own past, too close to resolve in "
+            f"{str(dt).replace('torch.', '')}; their tests are NaN"
+            + ("; dtype='float64' resolves more" if dt == torch.float32
+               else ""), RuntimeWarning, stacklevel=2)
     # rounding can take a gain of 0 just below 0, or one equal to the
     # restricted RSS just above it
     gain = np.clip(gain, 0, rss_r[None, :])

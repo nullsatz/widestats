@@ -63,11 +63,22 @@ def bspline_weights(x: np.ndarray, bins: int, order: int) -> np.ndarray:
     return w
 
 
-def _entropy_bits(prob: torch.Tensor, dims) -> torch.Tensor:
-    """``-sum p log2 p`` over `dims`, taking ``0 log 0`` as 0."""
-    terms = torch.where(prob > 0, prob * torch.log2(prob.clamp_min(1e-300)),
-                        0)
-    return -terms.sum(dim=dims)
+def _mi_bits(joint: torch.Tensor) -> torch.Tensor:
+    """Compute the mutual information of each joint distribution, in bits.
+
+    `joint` is ``(p, bins, q, bins)``, a ``bins x bins`` joint distribution
+    per pair. The marginals are taken from the joint itself (its row and
+    column sums), and ``sum P log2(P / (P_a P_b))`` computed directly:
+    the same as ``H_a + H_b - H_ab``, but without subtracting large
+    entropies, and consistent even when the joint carries rounding error
+    of its own. ``0 log 0`` counts as 0.
+    """
+    rows = joint.sum(dim=3, keepdim=True)          # p x bins x q x 1
+    cols = joint.sum(dim=1, keepdim=True)          # p x 1 x q x bins
+    ratio = joint / (rows * cols)
+    terms = torch.where(joint > 0,
+                        joint * torch.log2(ratio.clamp_min(1e-30)), 0)
+    return terms.sum(dim=(1, 3))
 
 
 def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
@@ -125,7 +136,12 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
     joint ones ``P_ij(a, b) = mean_s w_i(s, a) w_j(s, b)``, so that ``MI =
     H_i + H_j - H_ij`` with ``H = -sum P log2 P``. Stacking the weights of
     many variables side by side, ``W_x' W_y / n`` holds the joint
-    distribution of every pair, a ``bins x bins`` block per pair.
+    distribution of every pair, a ``bins x bins`` block per pair. Since
+    each sample's weights sum to 1, a block's row and column sums are the
+    two marginals, and MI is computed from the block alone as ``sum P_ij
+    log2(P_ij / (P_i P_j))``: the same quantity, without subtracting large
+    entropies to get a small difference, and consistent with any rounding
+    in the product.
 
     Examples
     --------
@@ -160,8 +176,6 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
                    dev, dt)
     wy = wx if self_ else to_device(
         bspline_weights(y, bins, order).reshape(n, q * bins), dev, dt)
-    hx = _entropy_bits(wx.mean(dim=0).reshape(p, bins), 1)
-    hy = hx if self_ else _entropy_bits(wy.mean(dim=0).reshape(q, bins), 1)
 
     if tile is None:
         tile = max(1, int(np.sqrt((1 << 24) / bins**2)))
@@ -175,8 +189,10 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
             joint = (wx[:, i0 * bins:i1 * bins].T
                      @ wy[:, j0 * bins:j1 * bins]) / n
             joint = joint.reshape(i1 - i0, bins, j1 - j0, bins)
-            hxy = _entropy_bits(joint, (1, 3))
-            block = hx[i0:i1, None] + hy[None, j0:j1] - hxy
-            mi[i0:i1, j0:j1] = block.cpu().to(torch.float64)
+            mi[i0:i1, j0:j1] = _mi_bits(joint).cpu().to(torch.float64)
+    mi = mi.numpy()
+    # a constant variable shares no information: exactly 0, not rounding
+    mi[np.ptp(x, axis=0) == 0, :] = 0.0
+    mi[:, np.ptp(y, axis=0) == 0] = 0.0
     # an estimate of 0 can round just below it
-    return np.maximum(mi.numpy(), 0.0)
+    return np.maximum(mi, 0.0)

@@ -219,3 +219,49 @@ def test_mutual_info_constant_variable_and_refusals(mi_data):
         ws.mutual_info(x[:1])
     with pytest.raises(ValueError, match="rows"):
         ws.mutual_info(x, x[:10])
+
+
+# --- regressions from the code review -----------------------------------------
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_granger_flags_a_cause_too_close_to_the_effect(dtype):
+    # cause = effect + 1e-6 noise: float32 once returned F ~ 3e-6 (p ~ 1)
+    # silently; the residual cross-products are below what it resolves
+    rng = np.random.default_rng(50)
+    e = rng.standard_normal(200).cumsum()
+    x = np.column_stack([e, e + 1e-6 * rng.standard_normal(200),
+                         rng.standard_normal(200)])
+    with pytest.warns(RuntimeWarning, match="too close to resolve"):
+        got = ws.granger(x, lag=2, device="cpu", dtype=dtype)
+    assert np.isnan(got.f[1, 0])
+    # an ordinary pair is unaffected
+    want, _ = granger_ref(x[:, 2], x[:, 0], 2)
+    assert got.f[2, 0] == pytest.approx(want, rel=rtol(dtype))
+
+
+def test_granger_cause_equal_to_an_effect_is_nan():
+    rng = np.random.default_rng(51)
+    x = rng.standard_normal((150, 3)).cumsum(axis=0)
+    with pytest.warns(RuntimeWarning, match="too close to resolve"):
+        got = ws.granger(x, x[:, [1]], lag=2, device="cpu", dtype="float64")
+    assert np.isnan(got.f[1, 0]) and np.isfinite(got.f[0, 0])
+
+
+def test_granger_long_series():
+    # long series: nothing T x T is formed (the QR once was, on Apple GPUs)
+    rng = np.random.default_rng(52)
+    x = rng.standard_normal((50_000, 3)).cumsum(axis=0)
+    x[1:, 2] += 0.05 * x[:-1, 0]
+    got = ws.granger(x, lag=3, device="cpu", dtype="float32")
+    want, _ = granger_ref(x[:, 0], x[:, 2], 3)
+    assert got.f[0, 2] == pytest.approx(want, rel=rtol("float32"))
+
+
+def test_mutual_info_constant_variable_is_exactly_zero_in_float32(mi_data):
+    # once a rounding error of ~1e-7 in float32, against a documented 0
+    x, y = mi_data
+    for k in range(x.shape[1]):
+        xk = x.copy()
+        xk[:, k] = -7.0
+        got = ws.mutual_info(xk, y, device="cpu", dtype="float32")
+        assert np.all(got[k] == 0.0), k
