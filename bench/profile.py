@@ -37,9 +37,7 @@ def cases():
         "cor_perm": lambda: ws.cor_perm(xp, yp, B=1000, seed=1, device=DEV),
         "ttest_perm": lambda: ws.ttest_perm(genes, group, B=10000, seed=1,
                                             device=DEV),
-        "granger64": lambda: ws.granger(walks, lag=2, device=DEV),
-        "granger32": lambda: ws.granger(walks, lag=2, device=DEV,
-                                        dtype="float32"),
+        "granger": lambda: ws.granger(walks, lag=2, device=DEV),
         "mutual_info": lambda: ws.mutual_info(xmi, device=DEV),
     }
 

@@ -287,16 +287,15 @@ def bench_granger(quick):
         rng = np.random.default_rng(4)
         x = rng.standard_normal((T, p)).cumsum(axis=0)
         size = f"{p:,} series x {T:,} times, lag {lag}"
+        # granger always computes in float64 (dtype is not a parameter)
         gpu, cpu = widestats_cases(
             "granger", size,
-            lambda x=x, **kw: ws.granger(x, lag=lag, **kw),
-            dtypes=("float64", "float32"))
+            lambda x=x, dtype=None, **kw: ws.granger(x, lag=lag, **kw),
+            dtypes=("float64",))
         if p <= 300:
             t, f = measure(lambda x=x: statsmodels_granger(x, lag))
-            np.testing.assert_allclose(gpu["float64"].f, f, rtol=1e-6)
+            np.testing.assert_allclose(gpu.f, f, rtol=1e-6)
             np.testing.assert_allclose(cpu.f, f, rtol=1e-6)
-            # float32 is less accurate on random walks (see the Notes)
-            np.testing.assert_allclose(gpu["float32"].f, f, rtol=5e-2)
             record("granger", size, "statsmodels, pair by pair", t,
                    f"{p * (p - 1):,} pairs")
 

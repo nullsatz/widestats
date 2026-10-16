@@ -68,16 +68,16 @@ def test_granger_matches_lstsq(series, device, dtype, lag, self_, tile):
     x, y = series
     yy = None if self_ else y
     effects = x if self_ else y
-    got = ws.granger(x, yy, lag=lag, tile=tile, device=device, dtype=dtype)
+    # granger computes in float64 on any device (the CPU for Apple GPUs)
+    got = ws.granger(x, yy, lag=lag, tile=tile, device=device)
     f = np.full(got.f.shape, np.nan)
     p = np.full(got.f.shape, np.nan)
     for i in range(x.shape[1]):
         for j in range(effects.shape[1]):
             if not (self_ and i == j):
                 f[i, j], p[i, j] = granger_ref(x[:, i], effects[:, j], lag)
-    np.testing.assert_allclose(got.f, f, rtol=rtol(dtype))
-    np.testing.assert_allclose(got.p_value, p, rtol=rtol(dtype),
-                               atol=1e-12 if dtype == "float64" else 1e-6)
+    np.testing.assert_allclose(got.f, f, rtol=1e-8)
+    np.testing.assert_allclose(got.p_value, p, rtol=1e-8, atol=1e-12)
     assert got.df == (lag, x.shape[0] - lag - 2 * lag - 1)
     assert got.lag == lag
     if self_:
@@ -87,7 +87,7 @@ def test_granger_matches_lstsq(series, device, dtype, lag, self_, tile):
 def test_granger_matches_statsmodels(series):
     tsa = pytest.importorskip("statsmodels.tsa.stattools")
     x, _ = series
-    got = ws.granger(x, lag=2, device="cpu", dtype="float64")
+    got = ws.granger(x, lag=2, device="cpu")
     for i, j in [(1, 3), (0, 5), (2, 4)]:
         # statsmodels tests whether the second column causes the first
         res = tsa.grangercausalitytests(x[:, [j, i]], maxlag=[2])
@@ -101,7 +101,7 @@ def test_granger_constant_series_and_refusals(series):
     x, _ = series
     x = x.copy()
     x[:, 2] = 3.0
-    got = ws.granger(x, lag=1, device="cpu", dtype="float64")
+    got = ws.granger(x, lag=1, device="cpu")
     assert np.all(np.isnan(got.f[2])) and np.all(np.isnan(got.f[:, 2]))
     assert np.isfinite(got.f[0, 1])
     with pytest.raises(ValueError, match="positive"):
@@ -225,27 +225,28 @@ def test_mutual_info_constant_variable_and_refusals(mi_data):
 
 # --- regressions from the code review -----------------------------------------
 
-@pytest.mark.parametrize("dtype", ["float32", "float64"])
-def test_granger_flags_a_cause_too_close_to_the_effect(dtype):
-    # cause = effect + 1e-6 noise: float32 once returned F ~ 3e-6 (p ~ 1)
-    # silently; the residual cross-products are below what it resolves
+def test_granger_resolves_a_cause_nearly_equal_to_the_effect():
+    # cause = effect + 1e-6 noise: once silently wrong (F ~ 3e-6) in
+    # float32, then flagged; with the residual lags formed explicitly in
+    # float64, the 1e-6 that is left is resolved accurately
     rng = np.random.default_rng(50)
     e = rng.standard_normal(200).cumsum()
     x = np.column_stack([e, e + 1e-6 * rng.standard_normal(200),
                          rng.standard_normal(200)])
-    with pytest.warns(RuntimeWarning, match="too close to resolve"):
-        got = ws.granger(x, lag=2, device="cpu", dtype=dtype)
-    assert np.isnan(got.f[1, 0])
-    # an ordinary pair is unaffected
-    want, _ = granger_ref(x[:, 2], x[:, 0], 2)
-    assert got.f[2, 0] == pytest.approx(want, rel=rtol(dtype))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = ws.granger(x, lag=2, device="cpu")
+    for i, j in [(1, 0), (2, 0)]:
+        want, _ = granger_ref(x[:, i], x[:, j], 2)
+        assert got.f[i, j] == pytest.approx(want, rel=1e-6)
 
 
 def test_granger_cause_equal_to_an_effect_is_nan():
     rng = np.random.default_rng(51)
     x = rng.standard_normal((150, 3)).cumsum(axis=0)
-    with pytest.warns(RuntimeWarning, match="too close to resolve"):
-        got = ws.granger(x, x[:, [1]], lag=2, device="cpu", dtype="float64")
+    # the cause is the effect: nothing of its lags is left beside them
+    with pytest.warns(RuntimeWarning, match="ill-conditioned"):
+        got = ws.granger(x, x[:, [1]], lag=2, device="cpu")
     assert np.isnan(got.f[1, 0]) and np.isfinite(got.f[0, 0])
 
 
@@ -254,9 +255,9 @@ def test_granger_long_series():
     rng = np.random.default_rng(52)
     x = rng.standard_normal((50_000, 3)).cumsum(axis=0)
     x[1:, 2] += 0.05 * x[:-1, 0]
-    got = ws.granger(x, lag=3, device="cpu", dtype="float32")
+    got = ws.granger(x, lag=3, device="cpu")
     want, _ = granger_ref(x[:, 0], x[:, 2], 3)
-    assert got.f[0, 2] == pytest.approx(want, rel=rtol("float32"))
+    assert got.f[0, 2] == pytest.approx(want, rel=1e-6)
 
 
 def test_mutual_info_constant_variable_is_exactly_zero_in_float32(mi_data):
@@ -269,9 +270,9 @@ def test_mutual_info_constant_variable_is_exactly_zero_in_float32(mi_data):
         assert np.all(got[k] == 0.0), k
 
 
-def test_granger_defaults_to_float64_where_the_device_has_it():
-    # float32 can be off by >10% in F on long random walks; the default on
-    # the CPU (and CUDA) is float64, accurate to lstsq's precision
+def test_granger_is_accurate_on_long_random_walks():
+    # float32 was off by >10% in F on long random walks; granger computes
+    # in float64, accurate to lstsq's precision
     rng = np.random.default_rng(54)
     x = rng.standard_normal((50_000, 2)).cumsum(axis=0)
     got = ws.granger(x, lag=1, device="cpu")
@@ -365,7 +366,7 @@ def test_granger_on_integrated_series_is_never_silently_wrong(k, n, lag):
         x = x.cumsum(axis=0)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        got = ws.granger(x, lag=lag, device="cpu", dtype="float64")
+        got = ws.granger(x, lag=lag, device="cpu")
     off = ~np.eye(3, dtype=bool)
     if np.isnan(got.f[off]).any():
         assert any("difference it" in str(w.message) for w in caught)
@@ -378,7 +379,7 @@ def test_granger_integrated_cases_check_some_pairs():
     # the test above is not vacuous: in these cases some pairs survive
     rng = np.random.default_rng(1)
     x = rng.standard_normal((300, 3)).cumsum(axis=0).cumsum(axis=0)
-    got = ws.granger(x, lag=2, device="cpu", dtype="float64")
+    got = ws.granger(x, lag=2, device="cpu")
     assert np.isfinite(got.f[~np.eye(3, dtype=bool)]).any()
 
 
@@ -394,7 +395,7 @@ def test_granger_does_not_flag_drifting_walks_or_trends(kind):
         x = 0.01 * np.arange(n)[:, None] + rng.standard_normal((n, 3))
     with warnings.catch_warnings():
         warnings.simplefilter("error")       # no "too close" warning
-        got = ws.granger(x, lag=3, device="cpu", dtype="float64")
+        got = ws.granger(x, lag=3, device="cpu")
     want, _ = granger_ref(x[:, 0], x[:, 1], 3)
     assert got.f[0, 1] == pytest.approx(want, rel=1e-4)
 
@@ -406,7 +407,7 @@ def test_granger_constant_series_gives_no_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         with np.errstate(invalid="ignore", divide="ignore"):
-            got = ws.granger(x, lag=2, device="cpu", dtype="float64")
+            got = ws.granger(x, lag=2, device="cpu")
     assert np.isnan(got.f[1]).all() and np.isnan(got.f[:, 1]).all()
     assert np.isfinite(got.f[0, 2])
 
@@ -423,3 +424,32 @@ def test_orthonormal_columns_falls_back_for_ill_conditioned_designs():
     qq = torch.linalg.qr(torch.tensor(a)).Q
     torch.testing.assert_close(q @ q.transpose(1, 2),
                                qq @ qq.transpose(1, 2), atol=1e-8, rtol=0)
+
+
+@pytest.mark.parametrize("panel,n,lag", [("mixed", 30_000, 4),
+                                         ("I2 drift", 30_000, 2)])
+def test_granger_mixed_and_drifting_integrated_panels(panel, n, lag):
+    # once 2-7% off without a flag: I(2) causes acting on I(1) effects
+    # (only the effect's conditioning was checked), and I(2) walks with
+    # drift. Every pair must be within 1e-4 of least squares, or flagged.
+    rng = np.random.default_rng(60)
+    if panel == "mixed":
+        x = np.column_stack([rng.standard_normal(n).cumsum(),
+                             rng.standard_normal(n).cumsum().cumsum(),
+                             rng.standard_normal(n).cumsum(),
+                             rng.standard_normal(n).cumsum().cumsum()])
+    else:
+        x = (1 + rng.standard_normal((n, 3))).cumsum(axis=0).cumsum(axis=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = ws.granger(x, lag=lag, device="cpu")
+    p = x.shape[1]
+    off = ~np.eye(p, dtype=bool)
+    if np.isnan(got.f[off]).any():
+        assert any("ill-conditioned" in str(w.message) for w in caught)
+    checked = 0
+    for i, j in zip(*np.nonzero(off & np.isfinite(got.f)), strict=True):
+        want, _ = granger_ref(x[:, i], x[:, j], lag)
+        assert got.f[i, j] == pytest.approx(want, rel=1e-4), (i, j)
+        checked += 1
+    assert checked > 0
