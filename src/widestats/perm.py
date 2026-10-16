@@ -64,6 +64,8 @@ def _permutations(n: int, B: int, seed) -> torch.Tensor:
     """
     if seed is None:
         seed = np.random.SeedSequence().entropy
+    elif int(seed) != seed:
+        raise ValueError("seed must be a whole number")
     g = torch.Generator().manual_seed(int(seed) % 2**63)
     return torch.argsort(torch.rand(B, n, generator=g, dtype=torch.float64),
                          dim=1)
@@ -418,6 +420,14 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
     labels[0] = torch.from_numpy(in1)
     perms = _permutations(n, B, seed)
     labels[1:] = torch.from_numpy(in1)[perms].to(dt)
+    if n1 == n2:
+        # With equal groups a labelling and its swap give the same |t| in
+        # exact arithmetic, but are computed by different roundings, which
+        # for strongly separated features can differ by more than the
+        # rounding allowance: a swap of the observed labelling could then
+        # fail to count, making p-values too small. Putting sample 0 in
+        # group 1 always makes the two the same row, bit for bit.
+        labels = torch.where(labels[:, :1] == 0, 1 - labels, labels)
     labels = labels.to(dev)
 
     def tstat(g):
@@ -443,32 +453,36 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         # difference (or exactly 0: a feature constant within each group).
         # Its t is enormous, so take it as infinite: a labelling separating
         # the groups that completely then counts as reaching the observed
-        # one, which is conservative. With equal means as well there is no
-        # test (NaN).
+        # one. With equal means as well there is no test (NaN).
         diff = m1 - m2
         # (a constant feature, scaled, is NaN: its diff is NaN, no test)
         t = torch.where(diff > 0, torch.inf, -torch.inf)
         t = torch.where((diff == 0) | diff.isnan(), torch.nan, t)
         return torch.where(se2 > 0, diff / se2.sqrt(), t)
 
-    # the observed t is recomputed here, in the device's precision, so that
-    # the permuted ones are compared with it on equal terms
-    t0 = tstat(labels[:1])[0]
-    usable = ~torch.isnan(t0)
-    bar = t0.abs() * (1 - eps)
-    counts = torch.zeros(p, dtype=torch.int64, device=dev)
-    maxima = torch.empty(B, dtype=torch.float64)
     if batch is None:
         # a batch holds about ten b x p intermediates: 8M entries each
         batch = max(1, (1 << 23) // p)
+    counts = torch.zeros(p, dtype=torch.int64, device=dev)
+    reach = torch.zeros(p, dtype=torch.int64, device=dev)
     for b0 in range(1, B + 1, batch):
-        tb = tstat(labels[b0:b0 + batch]).abs()
+        # Each batch recomputes the observed t as its first row, and its
+        # permuted t's are compared with that copy: the same arithmetic
+        # (even where the device picks kernels by batch size), so a
+        # labelling equivalent to the observed one always counts.
+        t = tstat(torch.cat([labels[:1], labels[b0:b0 + batch]]))
+        t0, tb = t[0], t[1:].abs()
+        usable = ~torch.isnan(t0)
+        bar = t0.abs() * (1 - eps)
+        # entries that are no test count as 0, so they neither reach a bar
+        # nor become a labelling's maximum
         tb = torch.where(usable & ~torch.isnan(tb), tb, 0)
         counts += (tb >= bar).sum(dim=0)
-        maxima[b0 - 1:b0 - 1 + len(tb)] = tb.amax(dim=1).cpu().to(torch.float64)
+        # maxT: how many of these labellings' largest |t| reach each bar
+        reach += (tb.amax(dim=1)[:, None] >= bar[None, :]).sum(dim=0)
 
-    t0 = t0.cpu().to(torch.float64).numpy()
-    out.p_perm = np.where(np.isnan(t0), np.nan,
-                          (counts.cpu().numpy() + 1) / (B + 1))
-    out.p_adjusted = _adjust(t0, maxima.numpy(), eps, B)
+    none = ~usable.cpu().numpy()
+    out.p_perm = np.where(none, np.nan, (counts.cpu().numpy() + 1) / (B + 1))
+    out.p_adjusted = np.where(none, np.nan,
+                              (reach.cpu().numpy() + 1) / (B + 1))
     return out

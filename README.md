@@ -55,7 +55,8 @@ device.
 
 ## Status
 
-Early: the three functions above agree with NumPy and SciPy (see `tests/`);
+Early: the three functions above agree with NumPy and SciPy, and the
+permutation tests with the same permutations done by SciPy (see `tests/`);
 not yet benchmarked or released. Next: Granger causality tests for every pair
 of series and B-spline mutual information (Daub et al. 2004), then
 benchmarks against the best CPU code, and a guide to the data sizes where
@@ -64,9 +65,23 @@ the GPU pays off.
 ## Installing
 
 ```sh
-pip install -e .          # from a checkout, for now
-pytest                    # CPU, and any GPU present
+pip install -e ".[test]"  # from a checkout, for now
+pytest                    # tests and docstring examples, on the CPU and any GPU
 ```
+
+## Developing
+
+- Docstrings follow the NumPy convention, and their examples run as tests.
+  To read the API documentation:
+
+  ```sh
+  pip install -e ".[docs]"
+  pdoc --docformat numpy widestats
+  ```
+
+- Before a pull request: `ruff check src tests`, and `pytest --cov`
+  (coverage is at 100%). CI runs both on Linux (Python 3.10 to 3.13) and
+  macOS, on the CPU; GPUs are tested by hand.
 
 ## License
 

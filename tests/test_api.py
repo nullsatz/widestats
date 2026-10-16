@@ -246,3 +246,33 @@ def test_refuses_mixed_labels_and_infinities(x):
     y[0, 0] = np.inf
     with pytest.raises(ValueError, match="infinite"):
         ws.cor_pairs(y, threshold=0.5)
+
+
+@pytest.mark.filterwarnings("ignore:Precision loss:RuntimeWarning")
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("n_each", [4, 5])
+def test_ttest_perm_equal_groups_count_the_swap(dtype, n_each):
+    # With equal groups, the swap of the observed labelling has the same
+    # |t|; for strongly separated features it once fell a rounding error
+    # short, halving p-values. Exact counts come from SciPy (two-pass
+    # variances) on the same permutations.
+    rng = np.random.default_rng(30)
+    g = np.repeat([0, 1], n_each)
+    # ten features at each separation: whether a swap rounds short varies
+    seps = np.repeat([30, 1e3, 1e4, 1e5, 1e7], 10)
+    x = np.column_stack([g * s + rng.standard_normal(2 * n_each)
+                         for s in seps])
+    B = 1000
+    got = ws.ttest_perm(x, g, B=B, seed=6, device="cpu", dtype=dtype)
+    t0 = stats.ttest_ind(x[g == 0], x[g == 1], equal_var=False).statistic
+    perms = _permutations(2 * n_each, B, 6).numpy()
+    tb = np.array([stats.ttest_ind(x[g[pm] == 0], x[g[pm] == 1],
+                                   equal_var=False).statistic for pm in perms])
+    want = ((np.abs(tb) >= np.abs(t0) * (1 - 1e-10)).sum(axis=0) + 1) / (B + 1)
+    np.testing.assert_array_equal(got.p_perm, want)
+    assert np.all(got.p_adjusted >= got.p_perm)
+
+
+def test_refuses_fractional_seed(x):
+    with pytest.raises(ValueError, match="whole number"):
+        ws.cor_perm(x, B=5, seed=3.7)
