@@ -311,7 +311,9 @@ def test_orthonormal_columns_matches_householder(lag, n):
     assert torch.all(cond < 1e5)            # random walks: well conditioned
     qq = torch.linalg.qr(t).Q
     eye = torch.eye(lag + 1, dtype=torch.float64).expand(3, -1, -1)
-    torch.testing.assert_close(q.transpose(1, 2) @ q, eye, atol=1e-12, rtol=0)
+    # Q'Q sums n products, so its rounding grows with n (about n * eps);
+    # 1e-12 was just exceeded at n = 50,000 on Linux's BLAS (1.08e-12)
+    torch.testing.assert_close(q.transpose(1, 2) @ q, eye, atol=1e-10, rtol=0)
     # same span: projecting a vector onto either basis gives the same result
     v = torch.tensor(rng.standard_normal((3, n, 1)))
     torch.testing.assert_close(q @ (q.transpose(1, 2) @ v),
