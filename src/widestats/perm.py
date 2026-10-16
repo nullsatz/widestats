@@ -356,12 +356,15 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
 
     A within-group sum of squares is found as a difference of sums, which
     cancels when the groups differ by thousands of within-group standard
-    deviations: float32 then cannot resolve the within-group variance. A
-    variance that comes out 0 while the means differ is taken as an
-    infinite t, so that such a labelling counts as reaching the observed
-    one; this errs on the conservative side. For features this strongly
-    separated the parametric p-value is beyond doubt anyway; use
-    ``dtype="float64"`` if their permutation p-values must be exact.
+    deviations: the precision then cannot resolve the within-group
+    variance. One within rounding of 0 is taken as 0, and a variance of 0
+    while the means differ as an infinite t, so that such a labelling
+    counts as reaching the observed one. Labellings equivalent to the
+    observed one (itself, and with equal group sizes its swap, which gives
+    the same |t|) are put in the same form and computed by the same
+    arithmetic, so they always count. In float32, statistics that agree to
+    about seven digits cannot be told apart and count as reaching each
+    other, which can only raise a p-value; float64 resolves them.
 
     Examples
     --------
