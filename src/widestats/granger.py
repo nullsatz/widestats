@@ -17,7 +17,13 @@ import numpy as np
 import torch
 from scipy import stats
 
-from ._core import as_matrix, pick_device, pick_dtype, to_device
+from ._core import (
+    as_matrix,
+    float64_solve_works,
+    pick_device,
+    pick_dtype,
+    to_device,
+)
 
 
 @dataclass
@@ -100,9 +106,11 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     ``Q_j``, from a QR decomposition) out of everything, ``g = L_i' e_j``
     is the cause's lags against the effect's residual and ``G = L_i' L_i -
     (Q_j' L_i)' (Q_j' L_i)`` the cause's residual cross-products. ``L_i'
-    e_j`` for all pairs is one matrix product, and so is ``Q_j' L_i``; the
-    ``lag x lag`` solves are done in float64 on the CPU. Each series is
-    first centred and scaled, which changes no F.
+    e_j`` for all pairs is one matrix product, and so is ``Q_j' L_i``. The
+    ``lag x lag`` systems, one per pair, are formed and solved in float64
+    as a batch on the device (CUDA, CPU), or on the CPU for Apple GPUs,
+    which have no float64. Each series is first centred and scaled, which
+    changes no F.
 
     A series is not tested against itself (its lags are already in the
     restricted model), and a constant series has no tests: NaN.
@@ -153,9 +161,13 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     lx = to_device(lagged(xs).reshape(times, p * lag), dev, dt)     # T x p*L
     ly = to_device(lagged(ys), dev, dt)                              # T x q x L
     target = to_device(ys[lag:], dev, dt)                            # T x q
-    # each cause's own lag cross-products, L_i' L_i
-    lx3 = lx.reshape(times, p, lag)
-    g0 = torch.einsum("tik,til->ikl", lx3, lx3)                      # p x L x L
+    # The lag x lag systems G g = gain are solved in float64, as G is a
+    # difference that can cancel: on the device where it can (CUDA, CPU),
+    # else (Apple GPUs) on the CPU. Each cause's own cross-products L_i' L_i
+    # come exactly from the float64 data.
+    solve_dev = dev if float64_solve_works(dev.type) else torch.device("cpu")
+    lx64 = lagged(xs)                                                # T x p x L
+    g0 = torch.from_numpy(np.einsum("tik,til->ikl", lx64, lx64)).to(solve_dev)
 
     if tile is None:
         tile = max(1, (1 << 24) // max(1, p * lag * (2 * lag + 1)))
@@ -175,15 +187,14 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         # orthogonal to Q_j, so nothing of Q_j' L enters g)
         g = (lx.T @ resid.T).reshape(p, lag, j1 - j0).permute(2, 0, 1)
         c = (qmat.transpose(1, 2) @ lx).reshape(j1 - j0, lag + 1, p, lag)
+        # to the CPU first when float64 is not on the device (mps)
+        c = c.to(solve_dev).to(torch.float64)
+        g = g.to(solve_dev).to(torch.float64)
         gmat = g0[None] - torch.einsum("bcik,bcil->bikl", c, c)
-        # the small solves in float64 on the CPU: more accurate, and Apple
-        # GPUs (mps) have no batched solve
-        gmat = gmat.cpu().to(torch.float64)
-        g = g.cpu().to(torch.float64)
         sol, info = torch.linalg.solve_ex(gmat, g[..., None])
         gb = (g * sol[..., 0]).sum(dim=2)                      # b x p
-        gb[info != 0] = torch.nan                              # singular G
-        gain[:, j0:j1] = gb.T
+        gb = torch.where(info == 0, gb, torch.nan)             # singular G
+        gain[:, j0:j1] = gb.T.cpu()
 
     rss_r = rss_r.numpy()
     gain = gain.numpy()
