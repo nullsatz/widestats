@@ -1,0 +1,4 @@
+GPU: NVIDIA RTX A5500 (24 GB), driver 580.76.05
+CPU: Intel Xeon Gold 6336Y @ 2.40GHz, 8 cores (OpenBLAS 8 threads, ~570 GFLOP/s double)
+torch 2.7.1 (CUDA 12.6), numpy 1.26.4, statsmodels 0.15.0, corals 0.1.7
+widestats at 2441f11 (library code; bench.py CorALS call fixed later)
