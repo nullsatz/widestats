@@ -276,3 +276,45 @@ def test_ttest_perm_equal_groups_count_the_swap(dtype, n_each):
 def test_refuses_fractional_seed(x):
     with pytest.raises(ValueError, match="whole number"):
         ws.cor_perm(x, B=5, seed=3.7)
+
+
+@pytest.mark.filterwarnings("ignore:Precision loss:RuntimeWarning")
+@pytest.mark.filterwarnings("ignore:invalid value:RuntimeWarning")
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_ttest_perm_exactly_constant_groups_in_maxt(dtype):
+    # A 0/1 feature is constant within both groups under some labellings
+    # (true t infinite); float32 once left it a rounding error of variance,
+    # a finite t, so it missed a co-tested feature's infinite t in maxT.
+    # the reviewer's construction, drawn in the same order
+    rng = np.random.default_rng(0)
+    n = 12
+    g = np.repeat([0, 1], 6)
+    rng.standard_normal(n)
+    binary = (rng.random(n) < 0.5) * 1.0
+    rng.standard_normal(n)
+    separated = np.r_[np.zeros(6), np.ones(6)] * 1e6 + rng.standard_normal(n)
+    x = np.column_stack([binary, separated])
+    B = 2000
+    got = ws.ttest_perm(x, g, B=B, seed=4, device="cpu", dtype=dtype)
+    in1 = g == 0
+    t0 = np.abs(stats.ttest_ind(x[in1], x[~in1], equal_var=False).statistic)
+    perms = _permutations(n, B, 4).numpy()
+    tb = np.abs(np.array([stats.ttest_ind(x[in1[pm]], x[~in1[pm]],
+                                          equal_var=False).statistic
+                          for pm in perms]))
+    tb = np.where(np.isnan(tb), 0, tb)
+    bar = t0 * (1 - 1e-10)
+    want_p = ((tb >= bar).sum(axis=0) + 1) / (B + 1)
+    want_adj = ((tb.max(axis=1)[:, None] >= bar).sum(axis=0) + 1) / (B + 1)
+    if dtype == "float64":
+        np.testing.assert_array_equal(got.p_perm, want_p)
+        np.testing.assert_array_equal(got.p_adjusted, want_adj)
+    else:
+        # the separated feature, the regression, is exact
+        assert got.p_perm[1] == want_p[1]
+        assert got.p_adjusted[1] == want_adj[1]
+        # the 0/1 feature's |t| = 1.1180340 is tied, to 7 digits, with the
+        # separated feature's under some labellings; float32 cannot tell
+        # them apart and counts them as reaching it: conservative
+        assert np.all(got.p_perm >= want_p)
+        assert np.all(got.p_adjusted >= want_adj)

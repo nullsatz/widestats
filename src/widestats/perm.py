@@ -439,10 +439,15 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         a1, b1 = g @ zt, g @ z2                      # group 1 sums, squares
         a2, b2 = s - a1, q - b1
         m1, m2 = a1 / n1, a2 / n2
-        # within-group sums of squared deviations; rounding can take an
-        # exactly-zero one below zero
-        ss1 = (b1 - a1 * m1).clamp_min(0)
-        ss2 = (b2 - a2 * m2).clamp_min(0)
+        # within-group sums of squared deviations, as differences of sums.
+        # One that is truly 0 (a feature constant within the group) comes
+        # out as rounding error of either sign, which would give a large
+        # finite t where the true t is infinite; within rounding of 0 is 0.
+        ss1 = b1 - a1 * m1
+        ss2 = b2 - a2 * m2
+        tiny = 16 * torch.finfo(zt.dtype).eps
+        ss1 = torch.where(ss1 <= tiny * b1, 0, ss1)
+        ss2 = torch.where(ss2 <= tiny * b2, 0, ss2)
         if equal_var:
             v = (ss1 + ss2) / (n - 2)
             se2 = v * (1 / n1 + 1 / n2)
@@ -465,6 +470,7 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         batch = max(1, (1 << 23) // p)
     counts = torch.zeros(p, dtype=torch.int64, device=dev)
     reach = torch.zeros(p, dtype=torch.int64, device=dev)
+    tested = None                      # which features have a test at all
     for b0 in range(1, B + 1, batch):
         # Each batch recomputes the observed t as its first row, and its
         # permuted t's are compared with that copy: the same arithmetic
@@ -473,6 +479,8 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         t = tstat(torch.cat([labels[:1], labels[b0:b0 + batch]]))
         t0, tb = t[0], t[1:].abs()
         usable = ~torch.isnan(t0)
+        if tested is None:
+            tested = usable
         bar = t0.abs() * (1 - eps)
         # entries that are no test count as 0, so they neither reach a bar
         # nor become a labelling's maximum
@@ -481,7 +489,7 @@ def ttest_perm(x, group, *, equal_var=False, B=0, seed=None, batch=None,
         # maxT: how many of these labellings' largest |t| reach each bar
         reach += (tb.amax(dim=1)[:, None] >= bar[None, :]).sum(dim=0)
 
-    none = ~usable.cpu().numpy()
+    none = ~tested.cpu().numpy()
     out.p_perm = np.where(none, np.nan, (counts.cpu().numpy() + 1) / (B + 1))
     out.p_adjusted = np.where(none, np.nan,
                               (reach.cpu().numpy() + 1) / (B + 1))
