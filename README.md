@@ -20,8 +20,40 @@ res = ws.ttest_perm(expr, group, B=10_000, seed=1)
 
 It runs on NVIDIA and AMD GPUs (`cuda`), Apple GPUs (`mps`, float32 only)
 and the CPU, choosing the first available; pass `device=` and
-`dtype="float64"` to choose. Inputs are NumPy arrays (or anything
+`dtype="float64"` to choose (`granger` always computes in float64). Inputs are NumPy arrays (or anything
 `numpy.asarray` takes, or torch tensors), samples in rows; results are NumPy.
+
+## How fast
+
+On one NVIDIA RTX A5500 (a workstation card), against the standard CPU
+tools for each job on 8 cores of a Xeon Gold 6336Y with a multithreaded
+BLAS. Each tool's answer was checked against the timed widestats result
+(within float32 rounding) before its time counted.
+
+| job | size | fastest standard CPU tool | widestats GPU | vs the tool | vs widestats on the CPU |
+|---|---|---|---|---|---|
+| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 6.9 s (NumPy, the matrix a tile at a time) | 0.19 s | **37×** | 22× |
+| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.7 s (NumPy, tiled) | 0.039 s | **44×** | 16× |
+| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorised NumPy) | 0.064 s | **169×** | 5× |
+| permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 63 s (NumPy, a BLAS product per permutation) | 0.95 s | **66×** | 18× |
+| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 75 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** | 32× |
+| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.45 s | **329×** | 1× |
+
+The last column separates what the GPU buys from what the algorithm buys.
+widestats on the same 8 CPU cores is already 2-31× faster than the tools,
+by doing each job as a few large matrix products; the GPU adds another
+5-32×. For Granger the gain is all the algorithm, one batched computation
+instead of 89,700 separate regressions, done in float64 for accuracy,
+which a workstation GPU runs no faster than the CPU (0.49 s). For the
+strongest pairs, the dedicated CPU tool CorALS took 6.5 min at 50,000
+variables: it is built to save memory rather than time, and plain NumPy in
+tiles is faster.
+
+Timings of the same code varied by up to about 40% between runs on this
+shared machine, so read the ratios as approximate. The full results, every
+size included, are in [`bench/results/results.md`](bench/results/results.md);
+`python bench/bench.py` reproduces them on your hardware (`--quick` for a
+short run) and `python bench/profile.py` shows where the time goes.
 
 ## What it does, and why
 
