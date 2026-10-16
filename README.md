@@ -95,16 +95,15 @@ before its time counted.
 | B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 75 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** |
 | Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.45 s | **329×** |
 
-Two things contribute to these speedups, and they are worth separating.
-The first is the algorithm: each job is done as a few large matrix products
-rather than a loop over pairs or permutations. That alone makes widestats
-roughly 2–30× faster than the standard tools *on the same 8 CPU cores*. The second
-is the GPU, which adds another 5–32× on top.
+Not all of the speedup is the GPU. Run on the same 8 CPU cores, widestats
+is still 2–30× faster than the standard tools, because each job is a few
+large matrix products instead of a loop over pairs or permutations. The
+GPU multiplies that by a further 5–32×.
 
-Granger is the exception: its whole gain is the algorithm, one batched
-computation instead of 89,700 separate regressions. It is computed in
-float64 for accuracy, which a workstation GPU runs no faster than a CPU, so
-on the GPU it takes the same 0.45 s as on the CPU.
+Granger gets nothing from the GPU. Its 329× is all algorithm: one batched
+computation in place of 89,700 separate regressions. It runs in float64,
+which a workstation GPU does no faster than a CPU, so the GPU and CPU
+times are both 0.45 s.
 
 CorALS, the CPU tool dedicated to finding the strongest pairs, took 6.5
 minutes at 50,000 variables. It is built to save memory rather than time;
