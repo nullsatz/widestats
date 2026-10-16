@@ -20,7 +20,7 @@ res = ws.ttest_perm(expr, group, B=10_000, seed=1)
 
 It runs on NVIDIA and AMD GPUs (`cuda`), Apple GPUs (`mps`, float32 only)
 and the CPU, choosing the first available; pass `device=` and
-`dtype="float64"` to choose. Inputs are NumPy arrays (or anything
+`dtype="float64"` to choose (`granger` always computes in float64). Inputs are NumPy arrays (or anything
 `numpy.asarray` takes, or torch tensors), samples in rows; results are NumPy.
 
 ## How fast

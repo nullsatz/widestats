@@ -283,7 +283,12 @@ def granger(x, y=None, *, lag=1, tile=None, device=None) -> Granger:
     walks with or without drift and trends stay far below (5e4 and 3e5 at
     most, measured), with F accurate to about 1e-8; series integrated two
     or three times can exceed them at long lags, and should be differenced
-    first, as Granger tests assume stationary series anyway.
+    first, as Granger tests assume stationary series anyway. Exactly
+    periodic series (a pure sinusoid) have collinear lags too.
+
+    A cause that is very nearly a lagged copy of the effect (within noise
+    of 1e-6 of its scale) gives an F of order 1e15, accurate only to about
+    1%; its p-value is 0 either way.
 
     A series is not tested against itself (its lags are already in the
     restricted model), and a constant series has no tests: NaN.
@@ -329,7 +334,8 @@ def granger(x, y=None, *, lag=1, tile=None, device=None) -> Granger:
             f"{int(weak.sum())} pair(s) are too ill-conditioned to resolve "
             "in float64: a cause almost exactly a linear function of the "
             "effect's own past, or nearly collinear lags (a series "
-            "integrated twice or more: difference it); their tests are NaN",
+            "integrated twice or more: difference it; or an exactly "
+            "periodic one); their tests are NaN",
             RuntimeWarning, stacklevel=2)
     # rounding can take a gain of 0 just below 0, or one equal to the
     # restricted RSS just above it
