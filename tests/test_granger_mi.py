@@ -267,27 +267,26 @@ def test_mutual_info_constant_variable_is_exactly_zero_in_float32(mi_data):
         assert np.all(got[k] == 0.0), k
 
 
-@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-@pytest.mark.parametrize("lag", [1, 3, 5])
-def test_gram_schmidt_matches_qr(dtype, lag):
-    # the Apple-GPU path, checked on the CPU against Householder QR: the
-    # same span (projections) and orthonormal columns, on random walks,
-    # whose lags are nearly collinear
-    from widestats.granger import _gram_schmidt
-    rng = np.random.default_rng(53)
-    n = 5000
-    walks = rng.standard_normal((n + lag, 4)).cumsum(axis=0)
-    a = np.stack([np.column_stack([np.ones(n)] + [w[lag - k:n + lag - k]
-                                                  for k in range(1, lag + 1)])
-                  for w in walks.T])
-    a = (a - a.mean(axis=1, keepdims=True) * (np.arange(lag + 1) > 0)) / \
-        np.sqrt(n)
-    t = torch.tensor(a, dtype=dtype)
-    q = _gram_schmidt(t)
-    qq = torch.linalg.qr(t).Q
-    tol = 1e-10 if dtype == torch.float64 else 1e-4
-    eye = torch.eye(lag + 1, dtype=dtype)
-    torch.testing.assert_close(q.transpose(1, 2) @ q, eye.expand_as(
-        q.transpose(1, 2) @ q), atol=tol, rtol=0)
-    torch.testing.assert_close(q @ q.transpose(1, 2),
-                               qq @ qq.transpose(1, 2), atol=tol, rtol=0)
+def test_granger_defaults_to_float64_where_the_device_has_it():
+    # float32 can be off by >10% in F on long random walks; the default on
+    # the CPU (and CUDA) is float64, accurate to lstsq's precision
+    rng = np.random.default_rng(54)
+    x = rng.standard_normal((50_000, 2)).cumsum(axis=0)
+    got = ws.granger(x, lag=1, device="cpu")
+    want, _ = granger_ref(x[:, 0], x[:, 1], 1)
+    assert got.f[0, 1] == pytest.approx(want, rel=1e-6)
+
+
+def test_mutual_info_nearly_empty_bin_is_finite_in_float32():
+    # one sample just entering an otherwise empty bin: the product of the
+    # bin's marginals underflowed in float32 and MI came out infinite
+    rng = np.random.default_rng(0)
+    n = 1000
+    z = rng.uniform(0, 0.5, n)
+    z[0], z[1], z[2] = 0, 8, 4 + 1.5e-10
+    v = z / 8
+    x = np.column_stack([v, v, rng.standard_normal(n)])
+    got = ws.mutual_info(x, device="cpu", dtype="float32")
+    want = ws.mutual_info(x, device="cpu", dtype="float64")
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)

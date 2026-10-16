@@ -61,35 +61,16 @@ def _orthonormal_columns(a: torch.Tensor) -> torch.Tensor:
     """Orthonormalise the few columns of each matrix in a batch.
 
     An orthonormal basis ``Q`` (``b x T x m``) of the columns of each
-    ``T x m`` matrix in `a`, by the best method the device runs well:
-    PyTorch's Householder QR (cuSOLVER on CUDA, LAPACK on the CPU), which
-    returns the reduced Q; elsewhere (Apple GPUs, whose QR builds a full
-    ``T x T`` Q, gigabytes per matrix for long series) `_gram_schmidt`.
-    A constant series' design gives NaN, so its tests are NaN.
+    ``T x m`` matrix in `a`, by Householder QR, which returns the reduced Q:
+    on the device for CUDA (cuSOLVER) and the CPU (LAPACK); for other
+    devices on the CPU, Q returned to the device. (PyTorch's QR on Apple
+    GPUs builds a full ``T x T`` Q, gigabytes per matrix for long series,
+    and Gram-Schmidt, which avoids that, is much less accurate in
+    float32.) A constant series' design gives NaN, so its tests are NaN.
     """
     if a.device.type in ("cuda", "cpu"):
         return torch.linalg.qr(a).Q
-    return _gram_schmidt(a)
-
-
-def _gram_schmidt(a: torch.Tensor) -> torch.Tensor:
-    """Orthonormalise the few columns of each matrix by Gram-Schmidt.
-
-    Classical Gram-Schmidt applied twice to each column ("twice is
-    enough": orthonormal to working precision), for ``(b, T, m)`` with `m`
-    small, using only batched elementwise products and sums, which every
-    device runs. A column with nothing left after the earlier ones (a
-    constant series) becomes NaN.
-    """
-    m = a.shape[2]
-    cols = []
-    for k in range(m):
-        v = a[:, :, k]
-        for _ in range(2):
-            for u in cols:
-                v = v - u * (u * v).sum(dim=1, keepdim=True)
-        cols.append(v / torch.linalg.vector_norm(v, dim=1, keepdim=True))
-    return torch.stack(cols, dim=2)
+    return torch.linalg.qr(a.cpu()).Q.to(a.device)
 
 
 def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
@@ -117,7 +98,11 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         Where to compute; by default the first that works of CUDA, MPS and
         the CPU.
     dtype : {"float32", "float64"}, optional
-        The precision the device computes in; float32 by default.
+        The precision the device computes in: by default float64 where the
+        device has it (CUDA, the CPU) and float32 on Apple GPUs. float32 is
+        faster but can be badly off for long, persistent series (by over
+        10% in F for random walks of 50,000 steps) or when the cause
+        explains nearly all of the effect; see Notes.
 
     Returns
     -------
@@ -159,7 +144,13 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     own past (nearly a copy of the effect) leaves residual cross-products
     too small to resolve beside ``L'L`` in the precision computed in: such
     pairs are NaN, with a warning. float32 resolves a residual variance down
-    to about 1e-4 of the cause's, float64 to about 1e-10.
+    to about 1e-4 of the cause's, float64 to about 1e-12.
+
+    Short of that, float32 still loses accuracy wherever the residuals are
+    small beside the series, as ``RSS_r - RSS_u`` then cancels: for long,
+    strongly persistent series, and when the cause explains nearly all of
+    the effect. That is why float64 is the default where the device has
+    it; on Apple GPUs (float32 only), use ``device="cpu"`` for such data.
 
     A series is not tested against itself (its lags are already in the
     restricted model), and a constant series has no tests: NaN.
@@ -192,6 +183,10 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         raise ValueError(f"the series are too short for lag {lag}: need at "
                          f"least {3 * lag + 2} times")
     dev = pick_device(device)
+    if dtype is None:
+        # float64 wherever the device has it: in float32 the F statistics of
+        # long, persistent series (random walks) can be off by over 10%
+        dtype = "float64" if float64_solve_works(dev.type) else "float32"
     dt = pick_dtype(dtype, dev)
     p, q = x.shape[1], y.shape[1]
 
@@ -225,7 +220,7 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     gain = torch.empty((p, q), dtype=torch.float64)
     rss_r = torch.empty(q, dtype=torch.float64)
     weak = torch.zeros((p, q), dtype=torch.bool)
-    tol = 1e-10 if dt == torch.float64 else 1e-4
+    tol = 1e-12 if dt == torch.float64 else 1e-4
     ones = torch.ones((times, 1), device=dev, dtype=dt)
     for j0 in range(0, q, tile):
         j1 = min(j0 + tile, q)

@@ -75,9 +75,13 @@ def _mi_bits(joint: torch.Tensor) -> torch.Tensor:
     """
     rows = joint.sum(dim=3, keepdim=True)          # p x bins x q x 1
     cols = joint.sum(dim=1, keepdim=True)          # p x 1 x q x bins
-    ratio = joint / (rows * cols)
+    # in logs: rows * cols can underflow to 0 in float32 for a nearly empty
+    # bin while the joint entry stays positive. Where the entry is positive
+    # its row and column sums are at least as large, so every log is finite.
+    tiny = torch.finfo(joint.dtype).tiny
+    log2 = lambda t: torch.log2(t.clamp_min(tiny))  # noqa: E731
     terms = torch.where(joint > 0,
-                        joint * torch.log2(ratio.clamp_min(1e-30)), 0)
+                        joint * (log2(joint) - log2(rows) - log2(cols)), 0)
     return terms.sum(dim=(1, 3))
 
 
