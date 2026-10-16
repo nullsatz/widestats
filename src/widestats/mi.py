@@ -19,7 +19,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ._core import as_matrix, pick_device, pick_dtype, to_device
+from ._core import (
+    as_matrix,
+    float64_solve_works,
+    pick_device,
+    pick_dtype,
+)
 
 
 def bspline_weights(x: np.ndarray, bins: int, order: int) -> np.ndarray:
@@ -54,14 +59,25 @@ def bspline_weights(x: np.ndarray, bins: int, order: int) -> np.ndarray:
         x, dtype=np.float64)), bins, order).numpy()
 
 
-def _bspline_weights(x: torch.Tensor, bins: int, order: int) -> torch.Tensor:
+def _bspline_weights(x: torch.Tensor, bins: int, order: int,
+                     dtype: torch.dtype | None = None,
+                     device: torch.device | None = None) -> torch.Tensor:
     """Compute `bspline_weights` for a tensor, on its device, in its dtype.
 
     Every value of every variable at once, by the Cox-de Boor recursion:
     the order-1 basis is the indicator of the knot interval a value falls
     in, and each higher order mixes two neighbouring lower-order functions
-    linearly. Returns ``(n, p, bins)``.
+    linearly. Returns ``(n, p, bins)`` in `dtype` on `device` (by default
+    those of `x`), always computed in float64 from `x` as given (on the CPU
+    if `device` has no float64): pass the data in float64, as rounding it
+    to float32 first moves values on a knot, as discrete data put them,
+    into the neighbouring bin.
     """
+    out_dtype = x.dtype if dtype is None else dtype
+    out_device = x.device if device is None else torch.device(device)
+    work = out_device if float64_solve_works(out_device.type) \
+        else torch.device("cpu")
+    x = x.to(work).to(torch.float64)
     span = bins - order + 1
     knots = torch.tensor(np.r_[np.zeros(order), np.arange(1, span),
                                np.full(order, span)],
@@ -87,7 +103,8 @@ def _bspline_weights(x: torch.Tensor, bins: int, order: int) -> torch.Tensor:
         right = torch.where(right_den > 0, (hi_k - z)
                             / right_den.clamp_min(1e-30), 0.0) * w[..., 1:]
         w = left + right
-    return w
+    # to the precision first: Apple GPUs (mps) cannot hold float64
+    return w.to(out_dtype).to(out_device)
 
 
 def _mi_bits(joint: torch.Tensor) -> torch.Tensor:
@@ -203,11 +220,12 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
     dt = pick_dtype(dtype, dev)
     p, q = x.shape[1], y.shape[1]
 
-    # the weights computed on the device, all values at once
-    wx = _bspline_weights(to_device(x, dev, dt), bins, order).reshape(
-        n, p * bins)
-    wy = wx if self_ else _bspline_weights(to_device(y, dev, dt), bins,
-                                           order).reshape(n, q * bins)
+    # the weights from the float64 data, all values at once on the device,
+    # then in the working precision
+    wx = _bspline_weights(torch.from_numpy(x), bins, order, dt,
+                          dev).reshape(n, p * bins)
+    wy = wx if self_ else _bspline_weights(torch.from_numpy(y), bins, order,
+                                           dt, dev).reshape(n, q * bins)
 
     if tile is None:
         tile = max(1, int(np.sqrt((1 << 24) / bins**2)))

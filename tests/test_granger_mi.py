@@ -304,7 +304,8 @@ def test_orthonormal_columns_matches_householder(lag, n):
                                                   for k in range(1, lag + 1)])
                   for w in walks.T])
     t = torch.tensor(a)
-    q = _orthonormal_columns(t)
+    q, cond = _orthonormal_columns(t)
+    assert torch.all(cond < 1e5)            # random walks: well conditioned
     qq = torch.linalg.qr(t).Q
     eye = torch.eye(lag + 1, dtype=torch.float64).expand(3, -1, -1)
     torch.testing.assert_close(q.transpose(1, 2) @ q, eye, atol=1e-12, rtol=0)
@@ -315,9 +316,68 @@ def test_orthonormal_columns_matches_householder(lag, n):
                                atol=1e-9, rtol=0)
 
 
-def test_orthonormal_columns_nan_for_a_constant_design():
+def test_orthonormal_columns_singular_and_nan_designs():
     from widestats.granger import _orthonormal_columns
-    a = torch.ones((2, 10, 2), dtype=torch.float64)       # two equal columns
-    a[1, :, 1] = torch.arange(10.0)
-    q = _orthonormal_columns(a)
-    assert torch.isnan(q[0]).all() and torch.isfinite(q[1]).all()
+    a = torch.ones((3, 10, 2), dtype=torch.float64)
+    a[1, :, 1] = torch.arange(10.0)                       # a good design
+    a[2, :, 1] = torch.nan                                # a constant series
+    q, cond = _orthonormal_columns(a)
+    assert cond[0] > 1e12                  # two equal columns: singular
+    assert torch.isfinite(q[1]).all() and cond[1] < 100
+    assert torch.isnan(q[2]).any() and torch.isinf(cond[2])
+
+
+@pytest.mark.parametrize("bins", [5, 10, 20, 30])
+def test_bspline_weights_float32_output_from_float64_data(bins):
+    # discrete data puts values exactly on knots; the weights are computed
+    # in float64 from the float64 data and only then cast, so no value
+    # moves bin (computing in float32 once moved them, MI off ~0.35 bits)
+    from widestats.mi import _bspline_weights
+    x = np.tile(np.arange(bins + 1) * 0.1, 3)[:, None]
+    for order in range(1, min(bins, 4) + 1):
+        w64 = _bspline_weights(torch.tensor(x), bins, order)
+        w32 = _bspline_weights(torch.tensor(x), bins, order, torch.float32)
+        assert w32.dtype == torch.float32 and w64.dtype == torch.float64
+        np.testing.assert_allclose(w32.numpy(), w64.numpy(), atol=1e-6)
+
+
+def test_mutual_info_discrete_data_float32_matches_float64():
+    rng = np.random.default_rng(56)
+    v = rng.integers(0, 31, 2000) * 0.1
+    x = np.column_stack([v, v, rng.integers(0, 31, 2000) * 0.1])
+    a = ws.mutual_info(x, bins=30, order=1, device="cpu", dtype="float32")
+    b = ws.mutual_info(x, bins=30, order=1, device="cpu", dtype="float64")
+    np.testing.assert_allclose(a, b, atol=1e-4)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+@pytest.mark.parametrize("k,n", [(2, 50_000), (3, 5000)])
+def test_granger_on_integrated_series_is_never_silently_wrong(k, n):
+    # series integrated twice or three times: the effect's own lags are
+    # nearly collinear (condition 1e8 to 1e10), and float64 once returned
+    # F = 1.7 where the answer is 2.88. Every pair must now be either
+    # flagged (NaN) or within 1% of an independent least-squares fit.
+    rng = np.random.default_rng(1)
+    x = rng.standard_normal((n, 3))
+    for _ in range(k):
+        x = x.cumsum(axis=0)
+    got = ws.granger(x, lag=5, device="cpu", dtype="float64")
+    for i in range(3):
+        for j in range(3):
+            if i != j and np.isfinite(got.f[i, j]):
+                want, _ = granger_ref(x[:, i], x[:, j], 5)
+                assert got.f[i, j] == pytest.approx(want, rel=0.01), (i, j)
+
+
+def test_orthonormal_columns_falls_back_for_ill_conditioned_designs():
+    from widestats.granger import _orthonormal_columns
+    rng = np.random.default_rng(57)
+    n = 5000
+    w = rng.standard_normal(n + 5).cumsum().cumsum().cumsum()    # I(3)
+    a = np.column_stack([np.ones(n)] + [w[5 - k:n + 5 - k]
+                                        for k in range(1, 6)])[None]
+    q, cond = _orthonormal_columns(torch.tensor(a))
+    assert cond[0] > 1e7                        # Cholesky-QR2 would fail
+    qq = torch.linalg.qr(torch.tensor(a)).Q
+    torch.testing.assert_close(q @ q.transpose(1, 2),
+                               qq @ qq.transpose(1, 2), atol=1e-8, rtol=0)

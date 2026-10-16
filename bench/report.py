@@ -16,10 +16,12 @@ from pathlib import Path
 
 
 def fmt(s):
+    """Format seconds for the table."""
     return "—" if s is None else (f"{s:.3f} s" if s < 10 else f"{s:.0f} s")
 
 
 def main(folder="bench/results"):
+    """Write results.md from results.csv and print it."""
     rows = list(csv.DictReader(open(Path(folder) / "results.csv")))
     cases = defaultdict(dict)
     order = []
@@ -41,7 +43,7 @@ def main(folder="bench/results"):
         base = {k: v for k, v in c.items() if not k.startswith("widestats")}
         if base:
             name, t = min(base.items(), key=lambda kv: kv[1])
-            speed = f"**{t / gpu:,.0f}×**"
+            speed = f"**{t / gpu:,.0f}×**"  # noqa: RUF001
         else:
             name, t, speed = "not run (too slow)", None, "—"
         out.append(f"| `{fn}` | {size} | {name} | {fmt(t)} | {fmt(cpu)} "

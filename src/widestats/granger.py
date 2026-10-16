@@ -57,33 +57,52 @@ class Granger:
     df: tuple[int, int]
 
 
-def _orthonormal_columns(a: torch.Tensor) -> torch.Tensor:
+def _orthonormal_columns(a: torch.Tensor):
     """Orthonormalise the few columns of each matrix in a batch.
 
-    An orthonormal basis ``Q`` (``b x T x m``, same device and precision as
-    `a`) of the columns of each ``T x m`` matrix in `a`, by Cholesky-QR2 in
-    float64: ``R`` from the Cholesky factor of the small Gram matrix ``A'A``
-    and ``Q = A R^{-1}``, done twice. With ``m`` a handful of columns it is
-    all batched matrix products and tiny factorisations, much faster on a
-    GPU than a batched Householder QR (one small kernel per matrix), and in
-    float64 as accurate as one for condition numbers up to about 1e8,
-    which lag designs stay far below. Done on the device where it has
-    float64 (CUDA, the CPU), else on the CPU. A matrix whose Gram matrix
-    is not positive definite (a constant series) gives NaN.
+    Returns an orthonormal basis ``Q`` (``b x T x m``, same device and
+    precision as `a`) of the columns of each ``T x m`` matrix in `a`, and
+    each matrix's condition number (float64, on the CPU).
+
+    Cholesky-QR2 in float64: ``R`` from the Cholesky factor of the small
+    Gram matrix ``A'A`` and ``Q = A R^{-1}``, done twice. With ``m`` a
+    handful of columns it is all batched matrix products and tiny
+    factorisations, much faster on a GPU than a batched Householder QR (one
+    small kernel per matrix), and in float64 as accurate for condition
+    numbers up to about 1e7. Matrices beyond that (series integrated twice
+    or more give 1e8 to 1e10) are factored by Householder QR instead. Done
+    on the device where it has float64 (CUDA, the CPU), else on the CPU. A
+    constant series' design gives NaN.
     """
     work = a.device if float64_solve_works(a.device.type) \
         else torch.device("cpu")
-    q = a.to(work).to(torch.float64)
-    bad = torch.zeros(q.shape[0], dtype=torch.bool, device=work)
+    a64 = a.to(work).to(torch.float64)
+    q, cond, bad = a64, None, torch.zeros(a.shape[0], dtype=torch.bool,
+                                          device=work)
     for _ in range(2):
         chol, info = torch.linalg.cholesky_ex(q.transpose(1, 2) @ q)
-        bad |= info != 0
+        if cond is None:
+            # cond(A) = cond(R) for A = Q R with Q orthonormal; infinite
+            # where the factorisation failed or the design is NaN
+            ok = (info == 0) & torch.isfinite(chol).flatten(1).all(dim=1)
+            eye = torch.eye(chol.shape[1], dtype=chol.dtype, device=work)
+            cond = torch.where(ok, torch.linalg.cond(
+                torch.where(ok[:, None, None], chol, eye)), torch.inf)
+        bad |= (info != 0) | ~(cond < 1e7)
         # Q R = A with R = chol', so Q = A R^{-1}: solve X R = A for X
         q = torch.linalg.solve_triangular(chol.transpose(1, 2), q,
                                           upper=True, left=False)
-    q[bad] = torch.nan
+    if bad.any():
+        # Householder for the ill-conditioned ones (a constant series' NaN
+        # design stays NaN)
+        qq, rr = torch.linalg.qr(a64[bad])
+        q[bad] = qq
+        finite = torch.isfinite(rr).flatten(1).all(dim=1)
+        eye = torch.eye(rr.shape[1], dtype=rr.dtype, device=work)
+        cond[bad] = torch.where(finite, torch.linalg.cond(
+            torch.where(finite[:, None, None], rr, eye)), torch.inf)
     # to the precision first: Apple GPUs (mps) cannot hold float64
-    return q.to(a.dtype).to(a.device)
+    return q.to(a.dtype).to(a.device), cond.cpu()
 
 
 def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
@@ -158,6 +177,14 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     too small to resolve beside ``L'L`` in the precision computed in: such
     pairs are NaN, with a warning. float32 resolves a residual variance down
     to about 1e-4 of the cause's, float64 to about 1e-12.
+
+    So are all the tests of an effect whose own lags are nearly collinear:
+    a restricted design with condition number above 1e5. White noise and
+    stationary series are near 1, random walks and near-unit-root series
+    at most a few hundred, but a series integrated twice or more reaches
+    1e7 to 1e11, where the cancellation in ``G`` is beyond this method.
+    Difference such series first, as Granger tests assume stationary series
+    anyway.
 
     Short of that, float32 still loses accuracy wherever the residuals are
     small beside the series, as ``RSS_r - RSS_u`` then cancels: for long,
@@ -241,7 +268,7 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         # each effect's restricted design D = [1, own lags], orthonormalised
         design = torch.cat([ones.expand(b, times, 1),
                             ly[:, j0:j1].permute(1, 0, 2)], dim=2)  # b x T x m
-        qmat = _orthonormal_columns(design)                        # b x T x m
+        qmat, cond = _orthonormal_columns(design)                  # b x T x m
         yb = target[:, j0:j1].T                                     # b x T
         resid = yb - (qmat @ (qmat.transpose(1, 2) @ yb[:, :, None]))[:, :, 0]
         rss_r[j0:j1] = (resid * resid).sum(dim=1).cpu().to(torch.float64)
@@ -259,10 +286,16 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         # A cause whose lags are almost a linear function of the effect's
         # own past leaves residual cross-products too small to resolve in
         # this precision beside L'L: G and the gain would be rounding noise.
+        # An effect whose own lags are nearly collinear (condition above
+        # 1e5: series integrated twice or more; random walks and
+        # near-unit-root series stay below about 300) leaves G = L'L - C'C
+        # to cancellation this method cannot control: all its tests are NaN.
+        hopeless = (cond > 1e5).to(solve_dev)
         resolved = (torch.diagonal(gmat, dim1=2, dim2=3)
                     / torch.diagonal(g0, dim1=1, dim2=2)[None]).amin(dim=2)
-        weak[:, j0:j1] = (resolved < tol).T.cpu()
-        gb = torch.where((info == 0) & (resolved >= tol), gb, torch.nan)
+        short = (resolved < tol) | hopeless[:, None]
+        weak[:, j0:j1] = short.T.cpu()
+        gb = torch.where((info == 0) & ~short, gb, torch.nan)
         gain[:, j0:j1] = gb.T.cpu()
 
     rss_r = rss_r.numpy()
@@ -273,9 +306,11 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         np.fill_diagonal(weak, False)       # not a test anyway
     if weak.any():
         warnings.warn(
-            f"{int(weak.sum())} pair(s) have a cause almost exactly a linear "
-            "function of the effect's own past, too close to resolve in "
-            f"{str(dt).replace('torch.', '')}; their tests are NaN"
+            f"{int(weak.sum())} pair(s) are too close to resolve in "
+            f"{str(dt).replace('torch.', '')}: a cause almost exactly a "
+            "linear function of the effect's own past, or an effect whose "
+            "own lags are nearly collinear (a series integrated twice or "
+            "more: difference it); their tests are NaN"
             + ("; dtype='float64' resolves more" if dt == torch.float32
                else ""), RuntimeWarning, stacklevel=2)
     # rounding can take a gain of 0 just below 0, or one equal to the

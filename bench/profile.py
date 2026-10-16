@@ -23,6 +23,7 @@ DEV = "cuda"
 
 
 def cases():
+    """Build each function's profiling case at a realistic size."""
     rng = np.random.default_rng(0)
     x20k = rng.standard_normal((100, 20000))
     xp = rng.exponential(size=(50, 3000))
@@ -44,6 +45,7 @@ def cases():
 
 
 def main(names):
+    """Profile the named cases (all by default) and print the tables."""
     all_cases = cases()
     for name in names or all_cases:
         f = all_cases[name]
