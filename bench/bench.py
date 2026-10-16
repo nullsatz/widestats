@@ -101,9 +101,12 @@ def bench_cor_pairs(quick):
             record("cor_pairs", size, "NumPy corrcoef + search", t)
         try:
             from corals.correlation.topk.default import cor_topk
-            t, res = once(lambda: cor_topk(x, threshold=0.8,
+            # CorALS takes the fraction of all pairs to return (k), a
+            # threshold filtering them: asked for as many as pass 0.8
+            frac = 1.05 * len(got) / (p * (p - 1) / 2)
+            t, res = once(lambda: cor_topk(x, k=frac, threshold=0.8,
                                             correlation_type="pearson"))
-            found = len(res[0]) if isinstance(res, tuple) else len(res)
+            found = len(res[0])
             record("cor_pairs", size, "CorALS cor_topk (threshold)", t,
                    f"{found} vs {len(got)} pairs")
         except Exception as e:                # baseline unavailable
