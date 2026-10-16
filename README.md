@@ -16,9 +16,11 @@ Python did not yet have on a GPU.
 ## Installing
 
 ```sh
-pip install -e ".[test]"   # from a checkout, until the first PyPI release
-pytest                     # the tests and docstring examples
+pip install widestats
 ```
+
+To work on it from a checkout, `pip install -e ".[test]"` and run `pytest`
+for the tests and docstring examples.
 
 widestats needs PyTorch 2.2 or later, NumPy and SciPy. It runs on NVIDIA
 and AMD GPUs (`cuda`), Apple GPUs (`mps`) and the CPU, and uses the first of
