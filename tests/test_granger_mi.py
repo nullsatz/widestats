@@ -265,3 +265,29 @@ def test_mutual_info_constant_variable_is_exactly_zero_in_float32(mi_data):
         xk[:, k] = -7.0
         got = ws.mutual_info(xk, y, device="cpu", dtype="float32")
         assert np.all(got[k] == 0.0), k
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("lag", [1, 3, 5])
+def test_gram_schmidt_matches_qr(dtype, lag):
+    # the Apple-GPU path, checked on the CPU against Householder QR: the
+    # same span (projections) and orthonormal columns, on random walks,
+    # whose lags are nearly collinear
+    from widestats.granger import _gram_schmidt
+    rng = np.random.default_rng(53)
+    n = 5000
+    walks = rng.standard_normal((n + lag, 4)).cumsum(axis=0)
+    a = np.stack([np.column_stack([np.ones(n)] + [w[lag - k:n + lag - k]
+                                                  for k in range(1, lag + 1)])
+                  for w in walks.T])
+    a = (a - a.mean(axis=1, keepdims=True) * (np.arange(lag + 1) > 0)) / \
+        np.sqrt(n)
+    t = torch.tensor(a, dtype=dtype)
+    q = _gram_schmidt(t)
+    qq = torch.linalg.qr(t).Q
+    tol = 1e-10 if dtype == torch.float64 else 1e-4
+    eye = torch.eye(lag + 1, dtype=dtype)
+    torch.testing.assert_close(q.transpose(1, 2) @ q, eye.expand_as(
+        q.transpose(1, 2) @ q), atol=tol, rtol=0)
+    torch.testing.assert_close(q @ q.transpose(1, 2),
+                               qq @ qq.transpose(1, 2), atol=tol, rtol=0)

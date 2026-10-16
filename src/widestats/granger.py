@@ -60,12 +60,26 @@ class Granger:
 def _orthonormal_columns(a: torch.Tensor) -> torch.Tensor:
     """Orthonormalise the few columns of each matrix in a batch.
 
+    An orthonormal basis ``Q`` (``b x T x m``) of the columns of each
+    ``T x m`` matrix in `a`, by the best method the device runs well:
+    PyTorch's Householder QR (cuSOLVER on CUDA, LAPACK on the CPU), which
+    returns the reduced Q; elsewhere (Apple GPUs, whose QR builds a full
+    ``T x T`` Q, gigabytes per matrix for long series) `_gram_schmidt`.
+    A constant series' design gives NaN, so its tests are NaN.
+    """
+    if a.device.type in ("cuda", "cpu"):
+        return torch.linalg.qr(a).Q
+    return _gram_schmidt(a)
+
+
+def _gram_schmidt(a: torch.Tensor) -> torch.Tensor:
+    """Orthonormalise the few columns of each matrix by Gram-Schmidt.
+
     Classical Gram-Schmidt applied twice to each column ("twice is
     enough": orthonormal to working precision), for ``(b, T, m)`` with `m`
-    small. It does what a reduced QR does here, with only batched products,
-    on any device: PyTorch's QR on Apple GPUs (mps) builds a full ``T x T``
-    Q, gigabytes per matrix for long series. A column with nothing left
-    after the earlier ones (a constant series) becomes NaN.
+    small, using only batched elementwise products and sums, which every
+    device runs. A column with nothing left after the earlier ones (a
+    constant series) becomes NaN.
     """
     m = a.shape[2]
     cols = []
@@ -131,7 +145,8 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
 
     By the Frisch-Waugh theorem, ``RSS_r - RSS_u = g' G^{-1} g``, where,
     after projecting the effect's restricted design ``[1, own lags]`` (an
-    orthonormal basis ``Q_j`` of it, by Gram-Schmidt) out of everything,
+    orthonormal basis ``Q_j`` of it: Householder QR on CUDA and the CPU,
+    Gram-Schmidt on Apple GPUs) out of everything,
     ``g = L_i' e_j`` is the cause's lags against the effect's residual and
     ``G = L_i' L_i - (Q_j' L_i)' (Q_j' L_i)`` the cause's residual
     cross-products. ``L' e`` for all pairs is one matrix product, and so is
