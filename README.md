@@ -30,21 +30,23 @@ tools for each job on 8 cores of a Xeon Gold 6336Y with a multithreaded
 BLAS. Each tool's answer was checked against the timed widestats result
 (within float32 rounding) before its time counted.
 
-| job | size | standard CPU tool | widestats GPU | vs the tool | vs widestats on the CPU |
+| job | size | fastest standard CPU tool | widestats GPU | vs the tool | vs widestats on the CPU |
 |---|---|---|---|---|---|
-| every pair with \|r\| ≥ 0.8 | 50,000 variables | 6.6 min ([CorALS](https://github.com/mgbckr/corals-python); NumPy would need a 20 GB matrix) | 0.19 s | **2,117×** | 13× |
-| every pair with \|r\| ≥ 0.8 | 20,000 variables | 5.8 s (NumPy `corrcoef` + search) | 0.039 s | **148×** | 18× |
-| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorised NumPy) | 0.066 s | **161×** | 5× |
-| permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 39 s (NumPy, a BLAS product per permutation) | 0.89 s | **44×** | 18× |
-| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 75 s (the same algorithm in NumPy) | 1.0 s | **72×** | 35× |
-| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.028 s | **5,203×** | 1× |
+| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 6.8 s (NumPy, the matrix a tile at a time) | 0.17 s | **40×** | 20× |
+| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.7 s (NumPy, tiled) | 0.038 s | **44×** | 18× |
+| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorised NumPy) | 0.065 s | **169×** | 7× |
+| permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 68 s (NumPy, a BLAS product per permutation) | 0.89 s | **77×** | 23× |
+| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 76 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** | 30× |
+| Granger test of every ordered pair | 300 series × 1,000 times | 2.5 min (statsmodels, pair by pair) | 0.028 s | **5,188×** | 1× |
 
 The last column separates what the GPU buys from what the algorithm buys.
-widestats on the same 8 CPU cores is already 2-31× faster than the tools
-(166× faster than CorALS), by doing each job as a few large matrix
-products; the GPU adds another 5-35×. For Granger the gain is all the
-algorithm, one batched computation instead of 89,700 separate regressions,
-so it is as fast on the CPU (0.030 s) as on the GPU.
+widestats on the same 8 CPU cores is already 2-26× faster than the tools,
+by doing each job as a few large matrix products; the GPU adds another
+7-36×. For Granger the gain is all the algorithm, one batched computation
+instead of 89,700 separate regressions, so it is as fast on the CPU
+(0.030 s) as on the GPU. (For the strongest pairs, the dedicated CPU tool
+CorALS took 6.5 min at 50,000 variables; it is built to save memory rather
+than time, and plain NumPy in tiles is faster.)
 
 The full results, every size included, are in
 [`bench/results/results.md`](bench/results/results.md); `python
