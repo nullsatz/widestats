@@ -1,106 +1,148 @@
 # widestats
 
-GPU statistics for wide data, on PyTorch: tens of thousands of variables,
-where the matrix of every pair is the problem.
+Statistics for wide data on a GPU, built on PyTorch.
 
-```python
-import widestats as ws
+Wide data has far more variables than samples: 20,000 genes measured in 100
+patients, 1,000 time series at 1,000 time points. Many questions about such
+data are about *every pair* of variables, and the number of pairs grows with
+the square of the number of variables. widestats answers those questions
+with a few large matrix products on the GPU, in seconds instead of
+minutes, and without building the full matrix of pairs in memory.
 
-# every pair of genes with |r| >= 0.8, without the 10 GB correlation matrix
-pairs = ws.cor_pairs(expr, threshold=0.8)          # expr: samples x genes
-pairs = ws.cor_pairs(expr, top=10)                 # each gene's 10 strongest
-
-# permutation p-values of every correlation, and maxT-adjusted ones
-res = ws.cor_perm(x, y, B=1000, seed=1)
-
-# Welch t test of every gene between two groups, with permutation and
-# maxT p-values
-res = ws.ttest_perm(expr, group, B=10_000, seed=1)
-```
-
-It runs on NVIDIA and AMD GPUs (`cuda`), Apple GPUs (`mps`, float32 only)
-and the CPU, choosing the first available; pass `device=` and
-`dtype="float64"` to choose (`granger` always computes in float64). Inputs are NumPy arrays (or anything
-`numpy.asarray` takes, or torch tensors), samples in rows; results are NumPy.
-
-## How fast
-
-On one NVIDIA RTX A5500 (a workstation card), against the standard CPU
-tools for each job on 8 cores of a Xeon Gold 6336Y with a multithreaded
-BLAS. Each tool's answer was checked against the timed widestats result
-(within float32 rounding) before its time counted.
-
-| job | size | fastest standard CPU tool | widestats GPU | vs the tool | vs widestats on the CPU |
-|---|---|---|---|---|---|
-| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 6.9 s (NumPy, the matrix a tile at a time) | 0.19 s | **37×** | 22× |
-| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.7 s (NumPy, tiled) | 0.039 s | **44×** | 16× |
-| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorised NumPy) | 0.064 s | **169×** | 5× |
-| permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 63 s (NumPy, a BLAS product per permutation) | 0.95 s | **66×** | 18× |
-| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 75 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** | 32× |
-| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.45 s | **329×** | 1× |
-
-The last column separates what the GPU buys from what the algorithm buys.
-widestats on the same 8 CPU cores is already 2-31× faster than the tools,
-by doing each job as a few large matrix products; the GPU adds another
-5-32×. For Granger the gain is all the algorithm, one batched computation
-instead of 89,700 separate regressions, done in float64 for accuracy,
-which a workstation GPU runs no faster than the CPU (0.49 s). For the
-strongest pairs, the dedicated CPU tool CorALS took 6.5 min at 50,000
-variables: it is built to save memory rather than time, and plain NumPy in
-tiles is faster.
-
-Timings of the same code varied by up to about 40% between runs on this
-shared machine, so read the ratios as approximate. The full results, every
-size included, are in [`bench/results/results.md`](bench/results/results.md);
-`python bench/bench.py` reproduces them on your hardware (`--quick` for a
-short run) and `python bench/profile.py` shows where the time goes.
-
-## What it does, and why
-
-| function | does | as |
-|---|---|---|
-| `cor_pairs` | the strongly correlated pairs, every pair over a threshold or each variable's top k, Pearson or Spearman | `np.corrcoef` then a search, without forming the matrix |
-| `cor_perm` | permutation p-values of every correlation, and Westfall-Young maxT adjusted ones | the same permutations through `np.corrcoef` |
-| `ttest_perm` | Welch's or Student's t test of every feature between two groups, with permutation and maxT p-values | `scipy.stats.ttest_ind`, and the same permutations through it |
-| `granger` | Granger causality F tests for every ordered pair of time series | statsmodels' `grangercausalitytests` (`ssr_ftest`), pair by pair |
-| `mutual_info` | B-spline mutual information (Daub et al. 2004) of every pair, which detects any dependence, not only correlation | the estimator from the paper, pair by pair |
-
-These are the functions of the R package
-[gputools](https://github.com/nullsatz/gputools) that Python lacks on a GPU:
-an eQTL scan is [tensorQTL](https://github.com/broadinstitute/tensorqtl)'s
-job, and k-means and PCA are [cuML](https://github.com/rapidsai/cuml)'s.
-
-- **`cor_pairs`** computes the correlation matrix a tile at a time on the
-  device (a matrix product of standardised columns) and keeps only what
-  passes, so memory goes with the tile and the answer, not with the number of
-  pairs.
-- **`cor_perm`** relies on shuffling rows leaving standardised columns
-  standardised: each permutation's correlations are one matrix product, and
-  a batch of permutations one batched product.
-- **`ttest_perm`** gets every feature's group sums and sums of squares under
-  every relabelling from two matrix products, `G'x` and `G'x²`, `G` the
-  samples-by-labellings indicator matrix. The observed t tests are SciPy's,
-  in float64 on the CPU.
-
-p-values are `(1 + b) / (1 + B)` (Phipson & Smyth 2010); the maxT adjustment
-(Westfall & Young 1993) controls the family-wise error rate. Permutations
-are drawn from `seed` on the CPU, so a seed gives the same ones on any
-device.
-
-## Status
-
-Early: every function agrees with an independent reference (NumPy, SciPy,
-statsmodels, or the published method written out; see `tests/`), on the
-CPU, Apple GPUs and CUDA; not yet benchmarked or released. Next:
-benchmarks against the best CPU code, and a guide to the data sizes where
-the GPU pays off.
+It is a Python port of the author's R package
+[gputools](https://github.com/nullsatz/gputools), of the functions that
+Python did not yet have on a GPU.
 
 ## Installing
 
 ```sh
-pip install -e ".[test]"  # from a checkout, for now
-pytest                    # tests and docstring examples, on the CPU and any GPU
+pip install -e ".[test]"   # from a checkout, until the first PyPI release
+pytest                     # the tests and docstring examples
 ```
+
+widestats needs PyTorch 2.2 or later, NumPy and SciPy. It runs on NVIDIA
+and AMD GPUs (`cuda`), Apple GPUs (`mps`) and the CPU, and uses the first of
+those it finds; pass `device=` to choose.
+
+## Using it
+
+```python
+import numpy as np
+import widestats as ws
+
+expr = np.load("expression.npy")      # samples x genes
+group = np.load("group.npy")          # 0 or 1 per sample
+
+# every pair of genes with |r| >= 0.8, without the 10 GB correlation matrix
+pairs = ws.cor_pairs(expr, threshold=0.8)
+pairs = ws.cor_pairs(expr, top=10)    # or each gene's 10 strongest partners
+pairs.to_frame()                      # i, j, r as a pandas DataFrame
+
+# Welch's t test of every gene between the two groups, with permutation
+# p-values and Westfall-Young maxT adjusted ones
+res = ws.ttest_perm(expr, group, B=10_000, seed=1)
+res.statistic, res.p_value, res.p_adjusted
+
+# permutation p-values for the correlation of every gene with every
+# clinical variable
+res = ws.cor_perm(expr, clinical, B=1000, seed=1)
+
+# Granger causality of every ordered pair of time series
+res = ws.granger(series, lag=2)       # series: times x series
+res.f, res.p_value
+
+# B-spline mutual information of every pair, which also finds
+# nonlinear dependence
+mi = ws.mutual_info(expr)
+```
+
+Inputs are NumPy arrays (or anything `numpy.asarray` accepts, or torch
+tensors) with samples in rows. Results come back as NumPy arrays, or as
+small result objects holding several of them.
+
+| function | computes | agrees with |
+|---|---|---|
+| `cor_pairs` | the strongly correlated pairs: every pair above a threshold, or each variable's top k; Pearson or Spearman | `np.corrcoef` followed by a search |
+| `cor_perm` | permutation p-values for every correlation, and maxT-adjusted ones | the same permutations through `np.corrcoef` |
+| `ttest_perm` | Welch's or Student's t test of every feature between two groups, with permutation and maxT p-values | `scipy.stats.ttest_ind`, and the same permutations through it |
+| `granger` | Granger causality F tests for every ordered pair of time series | statsmodels' `grangercausalitytests` (`ssr_ftest`), pair by pair |
+| `mutual_info` | B-spline mutual information (Daub et al. 2004) of every pair | the estimator from the paper, pair by pair |
+
+Every function is tested against the reference in the last column, on the
+CPU, Apple GPUs and CUDA (see `tests/`). Permutation p-values are
+`(1 + b) / (1 + B)` (Phipson & Smyth 2010), and the maxT adjustment
+(Westfall & Young 1993) controls the family-wise error rate. Permutations
+are drawn from `seed` on the CPU, so a seed gives the same ones on every
+device.
+
+For the pair problems that are not here: an eQTL scan is
+[tensorQTL](https://github.com/broadinstitute/tensorqtl)'s job, and k-means
+and PCA are [cuML](https://github.com/rapidsai/cuml)'s.
+
+## How fast
+
+Measured on one NVIDIA RTX A5500, a workstation card, against the fastest
+standard CPU tool for each job running on 8 cores of a Xeon Gold 6336Y with
+a multithreaded BLAS. Each tool's answer was checked against widestats'
+before its time counted.
+
+| job | size | fastest standard CPU tool | widestats GPU | speedup |
+|---|---|---|---|---|
+| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 6.9 s (NumPy, a tile at a time) | 0.19 s | **37×** |
+| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.7 s (NumPy, a tile at a time) | 0.039 s | **44×** |
+| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorized NumPy) | 0.064 s | **169×** |
+| permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 63 s (NumPy, one BLAS product per permutation) | 0.95 s | **66×** |
+| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 75 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** |
+| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.45 s | **329×** |
+
+Not all of the speedup is the GPU. Run on the same 8 CPU cores, widestats
+is still 2–30× faster than the standard tools, because each job is a few
+large matrix products instead of a loop over pairs or permutations. The
+GPU multiplies that by a further 5–32×.
+
+Granger gets nothing from the GPU. Its 329× is all algorithm: one batched
+computation in place of 89,700 separate regressions. It runs in float64,
+which a workstation GPU does no faster than a CPU, so the GPU and CPU
+times are both 0.45 s.
+
+CorALS, the CPU tool dedicated to finding the strongest pairs, took 6.5
+minutes at 50,000 variables. It is built to save memory rather than time;
+plain NumPy in tiles is faster.
+
+Timings varied by up to about 40% between runs on this shared machine, so
+read the ratios as approximate. The full results, including the CPU
+widestats times and more sizes, are in
+[`bench/results/results.md`](bench/results/results.md). To reproduce them
+on your own hardware, run `python bench/bench.py` (`--quick` for a short
+run); `python bench/profile.py` shows where the time goes.
+
+## How it works
+
+- **`cor_pairs`** computes the correlation matrix a tile at a time on the
+  device, as a matrix product of standardized columns, and keeps only the
+  pairs that pass. Memory scales with the tile and the answer, not with the
+  number of pairs.
+- **`cor_perm`** uses the fact that shuffling rows leaves standardized
+  columns standardized: each permutation's correlations are one matrix
+  product, and a batch of permutations one batched product.
+- **`ttest_perm`** gets every feature's group sums and sums of squares under
+  every relabelling from two matrix products, `G'x` and `G'x²`, where `G`
+  is the samples-by-labellings indicator matrix. The observed t tests are
+  SciPy's, in float64 on the CPU.
+- **`granger`** fits the restricted and unrestricted regressions of every
+  pair at once. The effect's own lags are projected out first, so each
+  pair's F test needs only a small system in the cause's lags, solved
+  batched over all pairs, in float64.
+- **`mutual_info`** spreads each value over neighboring bins with B-spline
+  weights, so one matrix product of the weight matrices gives the joint
+  distribution of every pair, and the mutual information of each is read
+  from its block.
+
+## Precision and devices
+
+Computation is in float32 by default; pass `dtype="float64"` for double precision on CUDA or
+the CPU. Apple GPUs have no float64. `granger` always computes in float64,
+because the regressions it solves are sensitive to rounding.
 
 ## Developing
 
