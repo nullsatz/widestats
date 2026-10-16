@@ -26,6 +26,14 @@ from ._core import (
     to_device,
 )
 
+# Above this condition number of an effect's restricted design, its tests
+# are NaN. Measured (float64, against lstsq, n = 200-50,000, lag 1-8):
+# white noise, seasonal, AR(0.99), AR(0.9999), random walks, trends with
+# AR noise and outliers stay below ~600, random walks with drift below
+# 1e5, all with errors under 1e-5; series integrated twice or more reach
+# 1e7 to 1e12, with errors from 1e-2 up.
+CONDITION_LIMIT = 1e6
+
 
 @dataclass
 class Granger:
@@ -179,12 +187,13 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     to about 1e-4 of the cause's, float64 to about 1e-12.
 
     So are all the tests of an effect whose own lags are nearly collinear:
-    a restricted design with condition number above 1e5. White noise and
-    stationary series are near 1, random walks and near-unit-root series
-    at most a few hundred, but a series integrated twice or more reaches
-    1e7 to 1e11, where the cancellation in ``G`` is beyond this method.
-    Difference such series first, as Granger tests assume stationary series
-    anyway.
+    a restricted design (intercept and lags, each at unit length) with
+    condition number above 1e6. White noise, seasonal and near-unit-root
+    series, random walks and trends with noise stay below about 600, and
+    random walks with drift below 1e5 (at 50,000 steps), all accurate to
+    1e-5 or better; a series integrated twice or more reaches 1e7 to
+    1e12, where the cancellation in ``G`` is beyond this method. Difference
+    such series first, as Granger tests assume stationary series anyway.
 
     Short of that, float32 still loses accuracy wherever the residuals are
     small beside the series, as ``RSS_r - RSS_u`` then cancels: for long,
@@ -261,7 +270,9 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
     rss_r = torch.empty(q, dtype=torch.float64)
     weak = torch.zeros((p, q), dtype=torch.bool)
     tol = 1e-12 if dt == torch.float64 else 1e-4
-    ones = torch.ones((times, 1), device=dev, dtype=dt)
+    # the intercept column at unit length, like the scaled lag columns, so
+    # that the design's condition number measures collinearity, not scale
+    ones = torch.full((times, 1), times ** -0.5, device=dev, dtype=dt)
     for j0 in range(0, q, tile):
         j1 = min(j0 + tile, q)
         b = j1 - j0
@@ -290,7 +301,8 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
         # 1e5: series integrated twice or more; random walks and
         # near-unit-root series stay below about 300) leaves G = L'L - C'C
         # to cancellation this method cannot control: all its tests are NaN.
-        hopeless = (cond > 1e5).to(solve_dev)
+        hopeless = (torch.isfinite(cond) & (cond > CONDITION_LIMIT)).to(
+            solve_dev)
         resolved = (torch.diagonal(gmat, dim1=2, dim2=3)
                     / torch.diagonal(g0, dim1=1, dim2=2)[None]).amin(dim=2)
         short = (resolved < tol) | hopeless[:, None]

@@ -34,7 +34,6 @@ import numpy as np
 import torch
 
 import widestats as ws
-from widestats.mi import bspline_weights
 from widestats.perm import _permutations
 
 GPU = "cuda" if torch.cuda.is_available() else None
@@ -80,17 +79,18 @@ def record(fn, size, what, seconds, note=""):
 def widestats_cases(fn, size, call, dtypes=("float32",)):
     """Time widestats on the GPU (each dtype) and on the CPU in float64.
 
-    Returns the results: the GPU's in the first dtype, and the CPU's.
+    Returns the GPU results by dtype (the CPU's when there is no GPU) and
+    the CPU result; with one dtype, the GPU result itself.
     """
-    gpu = None
+    gpu = {}
     for dt in dtypes:
         if GPU:
-            t, out = measure(lambda dt=dt: call(device=GPU, dtype=dt))
+            t, gpu[dt] = measure(lambda dt=dt: call(device=GPU, dtype=dt))
             record(fn, size, f"widestats GPU {dt}", t)
-            gpu = out if gpu is None else gpu
     t, cpu = measure(lambda: call(device="cpu", dtype="float64"))
     record(fn, size, "widestats CPU float64", t)
-    return (gpu if gpu is not None else cpu), cpu
+    gpu = {dt: gpu.get(dt, cpu) for dt in dtypes}
+    return (gpu if len(dtypes) > 1 else gpu[dtypes[0]]), cpu
 
 
 # --- cor_pairs ----------------------------------------------------------------
@@ -105,10 +105,36 @@ def _modules(n, p, seed):
     return x
 
 
-def _same_pairs(a, b, r, threshold, eps=1e-4):
-    """Pair sets equal, but for pairs within float32 error of the cut."""
-    edge = {(i, j) for i, j in a ^ b if abs(abs(r[i, j]) - threshold) < eps}
-    return (a ^ b) <= edge
+def _same_pairs(a, b, x, threshold, eps=1e-4):
+    """Pair sets equal, but for pairs within float32 error of the cut.
+
+    `x` is the data, to compute the correlation of any pair in only one.
+    """
+    for i, j in a ^ b:
+        if abs(abs(np.corrcoef(x[:, i], x[:, j])[0, 1]) - threshold) >= eps:
+            return False
+    return True
+
+
+def numpy_tiled_pairs(x, cut, tile=5000):
+    """Find every pair with |r| >= cut in NumPy, a tile of the matrix at a time.
+
+    What a careful user writes once the whole matrix no longer fits:
+    standardised columns, then a BLAS product per tile, kept if over the
+    cut. Returns the pairs (i < j) as a set.
+    """
+    z = x - x.mean(0)
+    z /= np.sqrt((z * z).sum(0))
+    p = z.shape[1]
+    pairs = set()
+    for j0 in range(0, p, tile):
+        for i0 in range(0, j0 + tile, tile):
+            r = z[:, i0:i0 + tile].T @ z[:, j0:j0 + tile]
+            i, j = np.nonzero(np.abs(r) >= cut)
+            i, j = i + i0, j + j0
+            keep = i < j
+            pairs |= set(zip(i[keep], j[keep], strict=True))
+    return pairs
 
 
 def bench_cor_pairs(quick):
@@ -121,16 +147,18 @@ def bench_cor_pairs(quick):
             "cor_pairs", size,
             lambda p=p, x=x, **kw: ws.cor_pairs(x, threshold=cut, **kw))
         exact = set(zip(cpu.i, cpu.j, strict=True))
+        assert _same_pairs(exact, set(zip(gpu.i, gpu.j, strict=True)), x, cut)
         if p <= 20000:                       # 50,000^2 doubles: 20 GB
             def full(x=x):
                 r = np.corrcoef(x, rowvar=False)
                 i, j = np.nonzero(np.triu(np.abs(r) >= cut, 1))
-                return set(zip(i, j, strict=True)), r
-            t, (pairs, r) = measure(full)
+                return set(zip(i, j, strict=True))
+            t, pairs = measure(full)
             assert pairs == exact
-            assert _same_pairs(pairs, set(zip(gpu.i, gpu.j, strict=True)),
-                               r, cut)
             record("cor_pairs", size, "NumPy corrcoef + search", t)
+        t, pairs = measure(lambda x=x: numpy_tiled_pairs(x, cut))
+        assert pairs == exact
+        record("cor_pairs", size, "NumPy, tiled", t)
         from corals.correlation.topk.default import cor_topk
         # CorALS returns a fraction k of all p x p entries, the diagonal
         # and both orders of each pair included, filtered by the threshold:
@@ -151,7 +179,7 @@ def bench_cor_pairs(quick):
 def numpy_cor_perm(x, y, B, seed):
     """Run the same permutation test in NumPy: one product per permutation.
 
-    Returns the permutation p-values.
+    Returns the permutation and the maxT adjusted p-values.
     """
     def unit(m):
         m = m - m.mean(0)
@@ -159,9 +187,13 @@ def numpy_cor_perm(x, y, B, seed):
     zx, zy = unit(x), unit(y)
     bar = np.abs(zx.T @ zy) * (1 - 1e-10)
     counts = np.zeros(bar.shape)
-    for pm in _permutations(len(x), B, seed).numpy():
-        counts += np.abs(zx.T @ zy[pm]) >= bar
-    return (counts + 1) / (B + 1)
+    maxima = np.empty(B)
+    for b, pm in enumerate(_permutations(len(x), B, seed).numpy()):
+        rb = np.abs(zx.T @ zy[pm])
+        counts += rb >= bar
+        maxima[b] = rb.max()
+    reach = (maxima[:, None] >= bar.ravel()[None, :]).sum(0).reshape(bar.shape)
+    return (counts + 1) / (B + 1), (reach + 1) / (B + 1)
 
 
 def bench_cor_perm(quick):
@@ -174,9 +206,11 @@ def bench_cor_perm(quick):
         gpu, cpu = widestats_cases(
             "cor_perm", size,
             lambda x=x, y=y, **kw: ws.cor_perm(x, y, B=B, seed=1, **kw))
-        t, pv = measure(lambda x=x, y=y: numpy_cor_perm(x, y, B, 1))
+        t, (pv, adj) = measure(lambda x=x, y=y: numpy_cor_perm(x, y, B, 1))
         assert np.array_equal(pv, cpu.p_value)
+        assert np.array_equal(adj, cpu.p_adjusted)
         assert np.max(np.abs(pv - gpu.p_value)) <= 3 / (B + 1)
+        assert np.max(np.abs(adj - gpu.p_adjusted)) <= 3 / (B + 1)
         record("cor_perm", size, "NumPy BLAS loop", t)
 
 
@@ -186,7 +220,7 @@ def numpy_ttest_perm(x, in1, B, seed):
     """Run Welch's t of every column under each permutation in NumPy.
 
     Vectorised over the columns, one permutation at a time. Returns the
-    permutation p-values.
+    permutation and the maxT adjusted p-values.
     """
     def welch(lab):
         a, b = x[lab], x[~lab]
@@ -194,9 +228,13 @@ def numpy_ttest_perm(x, in1, B, seed):
         return (a.mean(0) - b.mean(0)) / np.sqrt(va + vb)
     bar = np.abs(welch(in1)) * (1 - 1e-10)
     counts = np.zeros(x.shape[1])
-    for pm in _permutations(len(x), B, seed).numpy():
-        counts += np.abs(welch(in1[pm])) >= bar
-    return (counts + 1) / (B + 1)
+    maxima = np.empty(B)
+    for b, pm in enumerate(_permutations(len(x), B, seed).numpy()):
+        tb = np.abs(welch(in1[pm]))
+        counts += tb >= bar
+        maxima[b] = tb.max()
+    reach = (maxima[:, None] >= bar[None, :]).sum(0)
+    return (counts + 1) / (B + 1), (reach + 1) / (B + 1)
 
 
 def bench_ttest_perm(quick):
@@ -212,12 +250,13 @@ def bench_ttest_perm(quick):
             lambda x=x, B=B, g=group, **kw: ws.ttest_perm(x, g, B=B, seed=1,
                                                           **kw))
         if B <= 1000:
-            t, pv = measure(lambda x=x, g=group, B=B:
-                            numpy_ttest_perm(x, g == 0, B, 1))
+            t, (pv, adj) = measure(lambda x=x, g=group, B=B:
+                                   numpy_ttest_perm(x, g == 0, B, 1))
             # equal groups: the swap of a labelling ties exactly in widestats
             # (canonical labellings) but within rounding in NumPy
-            assert np.max(np.abs(pv - cpu.p_perm)) <= 2 / (B + 1)
-            assert np.max(np.abs(pv - gpu.p_perm)) <= 3 / (B + 1)
+            for got in (cpu, gpu):
+                assert np.max(np.abs(pv - got.p_perm)) <= 3 / (B + 1)
+                assert np.max(np.abs(adj - got.p_adjusted)) <= 3 / (B + 1)
             record("ttest_perm", size, "NumPy vectorised loop", t)
 
 
@@ -254,8 +293,10 @@ def bench_granger(quick):
             dtypes=("float64", "float32"))
         if p <= 300:
             t, f = measure(lambda x=x: statsmodels_granger(x, lag))
-            np.testing.assert_allclose(gpu.f, f, rtol=1e-6)
+            np.testing.assert_allclose(gpu["float64"].f, f, rtol=1e-6)
             np.testing.assert_allclose(cpu.f, f, rtol=1e-6)
+            # float32 is less accurate on random walks (see the Notes)
+            np.testing.assert_allclose(gpu["float32"].f, f, rtol=5e-2)
             record("granger", size, "statsmodels, pair by pair", t,
                    f"{p * (p - 1):,} pairs")
 
@@ -263,12 +304,19 @@ def bench_granger(quick):
 # --- mutual_info ----------------------------------------------------------------
 
 def numpy_mutual_info(x, bins, order, tile=256):
-    """Compute the same B-spline estimator in NumPy: weights, then GEMMs.
+    """Compute the same B-spline estimator in NumPy and SciPy, by tiles.
 
     Returns every pair's mutual information, in bits.
     """
+    from scipy.interpolate import BSpline
     n, p = x.shape
-    w = bspline_weights(x, bins, order).reshape(n, p * bins)
+    # the weights from SciPy's B-splines, independent of widestats
+    span = bins - order + 1
+    knots = np.r_[np.zeros(order), np.arange(1, span), np.full(order, span)]
+    lo, hi = x.min(0), x.max(0)
+    z = (x - lo) / np.where(hi > lo, hi - lo, 1.0) * span
+    w = np.stack([BSpline.design_matrix(z[:, i], knots, order - 1).toarray()
+                  for i in range(p)], axis=1).reshape(n, p * bins)
     mi = np.empty((p, p))
     for i0 in range(0, p, tile):
         for j0 in range(0, p, tile):

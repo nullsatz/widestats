@@ -6,6 +6,8 @@ Mutual information: the B-spline weights by the Cox-de Boor recursion
 written out from Daub et al. (2004), independent of SciPy's.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -350,23 +352,63 @@ def test_mutual_info_discrete_data_float32_matches_float64():
     np.testing.assert_allclose(a, b, atol=1e-4)
 
 
-@pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@pytest.mark.parametrize("k,n", [(2, 50_000), (3, 5000)])
-def test_granger_on_integrated_series_is_never_silently_wrong(k, n):
+@pytest.mark.parametrize("k,n,lag", [(2, 5000, 5), (2, 50_000, 5),
+                                     (3, 5000, 5), (3, 300, 2)])
+def test_granger_on_integrated_series_is_never_silently_wrong(k, n, lag):
     # series integrated twice or three times: the effect's own lags are
-    # nearly collinear (condition 1e8 to 1e10), and float64 once returned
+    # nearly collinear (condition up to 1e12), and float64 once returned
     # F = 1.7 where the answer is 2.88. Every pair must now be either
-    # flagged (NaN) or within 1% of an independent least-squares fit.
+    # flagged (NaN, with a warning) or within 0.1% of least squares.
     rng = np.random.default_rng(1)
     x = rng.standard_normal((n, 3))
     for _ in range(k):
         x = x.cumsum(axis=0)
-    got = ws.granger(x, lag=5, device="cpu", dtype="float64")
-    for i in range(3):
-        for j in range(3):
-            if i != j and np.isfinite(got.f[i, j]):
-                want, _ = granger_ref(x[:, i], x[:, j], 5)
-                assert got.f[i, j] == pytest.approx(want, rel=0.01), (i, j)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        got = ws.granger(x, lag=lag, device="cpu", dtype="float64")
+    off = ~np.eye(3, dtype=bool)
+    if np.isnan(got.f[off]).any():
+        assert any("difference it" in str(w.message) for w in caught)
+    for i, j in zip(*np.nonzero(off & np.isfinite(got.f)), strict=True):
+        want, _ = granger_ref(x[:, i], x[:, j], lag)
+        assert got.f[i, j] == pytest.approx(want, rel=1e-3), (i, j)
+
+
+def test_granger_integrated_cases_check_some_pairs():
+    # the test above is not vacuous: in these cases some pairs survive
+    rng = np.random.default_rng(1)
+    x = rng.standard_normal((300, 3)).cumsum(axis=0).cumsum(axis=0)
+    got = ws.granger(x, lag=2, device="cpu", dtype="float64")
+    assert np.isfinite(got.f[~np.eye(3, dtype=bool)]).any()
+
+
+@pytest.mark.parametrize("kind", ["drift", "trend"])
+def test_granger_does_not_flag_drifting_walks_or_trends(kind):
+    # these were once all NaN: the intercept's scale had inflated the
+    # condition number past the cut. They are accurate and kept.
+    rng = np.random.default_rng(58)
+    n = 50_000
+    if kind == "drift":
+        x = (1 + rng.standard_normal((n, 3))).cumsum(axis=0)
+    else:
+        x = 0.01 * np.arange(n)[:, None] + rng.standard_normal((n, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")       # no "too close" warning
+        got = ws.granger(x, lag=3, device="cpu", dtype="float64")
+    want, _ = granger_ref(x[:, 0], x[:, 1], 3)
+    assert got.f[0, 1] == pytest.approx(want, rel=1e-4)
+
+
+def test_granger_constant_series_gives_no_warning():
+    rng = np.random.default_rng(59)
+    x = rng.standard_normal((200, 3)).cumsum(axis=0)
+    x[:, 1] = 4.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            got = ws.granger(x, lag=2, device="cpu", dtype="float64")
+    assert np.isnan(got.f[1]).all() and np.isnan(got.f[:, 1]).all()
+    assert np.isfinite(got.f[0, 2])
 
 
 def test_orthonormal_columns_falls_back_for_ill_conditioned_designs():
