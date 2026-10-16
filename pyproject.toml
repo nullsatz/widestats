@@ -4,15 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name = "widestats"
-version = "0.1.0.dev0"
-description = "GPU statistics for wide data: strongest correlated pairs, permutation tests with maxT, on PyTorch"
+version = "0.1.0"
+description = "Statistics for wide data on a GPU, on PyTorch: strongest correlated pairs, permutation and maxT tests, Granger causality and mutual information of every pair"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 authors = [{ name = "Josh Buckner", email = "nullsatz@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "scipy>=1.10", "torch>=2.2"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
@@ -23,6 +30,10 @@ docs = ["pdoc>=14"]
 
 [project.urls]
 Source = "https://github.com/nullsatz/widestats"
+Issues = "https://github.com/nullsatz/widestats/issues"
+
+[tool.hatch.build.targets.sdist]
+exclude = [".github", "bench/results"]
 
 [tool.pytest.ini_options]
 # the docstring examples run as tests too, so they cannot go stale
