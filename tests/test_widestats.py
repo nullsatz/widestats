@@ -1,6 +1,8 @@
-"""widestats against NumPy and SciPy: the same pairs, correlations, t tests
-and permutation p-values, on the CPU in float64 and float32 and on whatever
-GPU is present."""
+"""widestats against NumPy and SciPy.
+
+The same pairs, correlations, t tests and permutation p-values, on the CPU
+in float64 and float32 and on whatever GPU is present.
+"""
 
 import numpy as np
 import pytest
@@ -10,10 +12,12 @@ from scipy import stats
 import widestats as ws
 from widestats.perm import _permutations
 
+# the GPUs that work here: reported available and able to compute (a CI
+# virtual machine can report an Apple GPU it cannot use)
 DEVICES = [("cpu", "float64"), ("cpu", "float32")]
-if torch.cuda.is_available():
+if torch.cuda.is_available() and ws._core.device_works("cuda"):
     DEVICES += [("cuda", "float64"), ("cuda", "float32")]
-if torch.backends.mps.is_available():
+if torch.backends.mps.is_available() and ws._core.device_works("mps"):
     DEVICES += [("mps", "float32")]
 
 

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check src tests
+
+  test:
+    # GitHub's runners have no usable GPU: these test the CPU path. GPU runs
+    # are done by hand (CUDA on a cluster, MPS on a Mac).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-14
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (CPU-only PyTorch on Linux, the smaller download)
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
+          fi
+          pip install -e ".[test]"
+      - name: Tests, doctests and coverage
+        run: pytest -q --cov --cov-report=term-missing --cov-fail-under=95

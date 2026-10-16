@@ -18,10 +18,36 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=7", "pytest-cov>=4", "pandas"]
+docs = ["pdoc>=14"]
 
 [project.urls]
 Source = "https://github.com/nullsatz/widestats"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# the docstring examples run as tests too, so they cannot go stale
+testpaths = ["tests", "src/widestats"]
+addopts = "--doctest-modules"
+
+[tool.coverage.run]
+source = ["widestats"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle, import order, bugbear, pyupgrade, NumPy-specific,
+# ruff's own, and docstrings in the NumPy convention
+select = ["F", "E", "W", "I", "B", "UP", "NPY", "RUF", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# tests document themselves by their names and module docstrings
+"tests/*" = ["D100", "D103"]
