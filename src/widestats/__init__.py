@@ -24,6 +24,8 @@ These are the functions of the R package gputools
 checked against NumPy and SciPy the same way.
 """
 
+from importlib.metadata import version as _version
+
 from ._core import pick_device
 from .granger import Granger, granger
 from .mi import mutual_info
@@ -43,4 +45,4 @@ __all__ = [
     "ttest_perm",
 ]
 
-__version__ = "0.1.0.dev0"
+__version__ = _version("widestats")   # the one in pyproject.toml
