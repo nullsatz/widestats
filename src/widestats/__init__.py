@@ -1,27 +1,35 @@
-"""GPU statistics for wide data, on PyTorch.
+"""Statistics for wide data on a GPU, built on PyTorch.
 
-For data with tens of thousands of variables, where the matrix of every
-pair is the problem:
+Wide data has far more variables than samples: 20,000 genes in 100
+patients, 1,000 time series at 1,000 time points. Many questions about such
+data are about every pair of variables, and the number of pairs grows with
+the square of the number of variables. widestats answers those questions
+with a few large matrix products on the GPU, without building the full
+matrix of pairs in memory.
 
-- `cor_pairs`: the strongly correlated pairs (every pair over a threshold,
-  or each variable's top k), without forming the correlation matrix.
+- `cor_pairs`: the strongly correlated pairs, every pair over a threshold
+  or each variable's top k, without forming the correlation matrix.
 - `cor_perm`: permutation p-values for every correlation, and p-values
   adjusted for testing them all (Westfall and Young's maxT).
 - `ttest_perm`: a t test of every feature between two groups, with
   permutation and maxT p-values.
-- `granger`: Granger causality F tests for every pair of time series.
+- `granger`: Granger causality F tests for every ordered pair of time
+  series.
 - `mutual_info`: the B-spline mutual information (Daub et al. 2004) of
-  every pair of variables, which detects any kind of dependence.
+  every pair of variables, which also finds nonlinear dependence.
 
 Each runs on NVIDIA and AMD GPUs (``"cuda"``), Apple GPUs (``"mps"``,
-float32 only) or the CPU, choosing the first available unless given
-``device=``; float32 by default, float64 with ``dtype="float64"``. Inputs
-are matrices with the samples in rows (NumPy arrays, anything
-`numpy.asarray` accepts, or torch tensors); results are NumPy arrays.
+float32 only) or the CPU, using the first it finds unless given
+``device=``; float32 by default, float64 with ``dtype="float64"``
+(`granger` always computes in float64). Inputs are matrices with the
+samples in rows: NumPy arrays, anything `numpy.asarray` accepts, or torch
+tensors. Results are NumPy arrays, or small result objects holding several.
 
 These are the functions of the R package gputools
-(https://github.com/nullsatz/gputools) that Python lacks on a GPU, and are
-checked against NumPy and SciPy the same way.
+(https://github.com/nullsatz/gputools) that Python did not yet have on a
+GPU. Each is tested against NumPy, SciPy, statsmodels or the published
+method. The README (https://github.com/nullsatz/widestats) has examples
+and benchmarks.
 """
 
 from importlib.metadata import version as _version

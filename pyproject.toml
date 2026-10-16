@@ -29,6 +29,7 @@ test = ["pytest>=7", "pytest-cov>=4", "pandas"]
 docs = ["pdoc>=14"]
 
 [project.urls]
+Documentation = "https://nullsatz.github.io/widestats/"
 Source = "https://github.com/nullsatz/widestats"
 Issues = "https://github.com/nullsatz/widestats/issues"
 

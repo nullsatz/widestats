@@ -60,7 +60,8 @@ mi = ws.mutual_info(expr)
 
 Inputs are NumPy arrays (or anything `numpy.asarray` accepts, or torch
 tensors) with samples in rows. Results come back as NumPy arrays, or as
-small result objects holding several of them.
+small result objects holding several of them. Every argument and result
+is described in the [API documentation](https://nullsatz.github.io/widestats/).
 
 | function | computes | agrees with |
 |---|---|---|
@@ -149,11 +150,12 @@ because the regressions it solves are sensitive to rounding.
 ## Developing
 
 - Docstrings follow the NumPy convention, and their examples run as tests.
-  To read the API documentation:
+  The [API documentation](https://nullsatz.github.io/widestats/) is built
+  from them with pdoc on every push to main; to preview it locally:
 
   ```sh
   pip install -e ".[docs]"
-  pdoc --docformat numpy widestats
+  pdoc --docformat numpy widestats '!widestats.granger'
   ```
 
 - Before a pull request: `ruff check src tests`, and `pytest --cov`
