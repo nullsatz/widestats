@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from scipy.interpolate import BSpline
 
 from ._core import as_matrix, pick_device, pick_dtype, to_device
 
@@ -51,15 +50,43 @@ def bspline_weights(x: np.ndarray, bins: int, order: int) -> np.ndarray:
     order + 1, ..., bins - order + 1`` (each end repeated `order` times), as
     in Daub et al. A constant variable is put wholly at 0.
     """
-    n, p = x.shape
+    return _bspline_weights(torch.from_numpy(np.ascontiguousarray(
+        x, dtype=np.float64)), bins, order).numpy()
+
+
+def _bspline_weights(x: torch.Tensor, bins: int, order: int) -> torch.Tensor:
+    """Compute `bspline_weights` for a tensor, on its device, in its dtype.
+
+    Every value of every variable at once, by the Cox-de Boor recursion:
+    the order-1 basis is the indicator of the knot interval a value falls
+    in, and each higher order mixes two neighbouring lower-order functions
+    linearly. Returns ``(n, p, bins)``.
+    """
     span = bins - order + 1
-    knots = np.r_[np.zeros(order), np.arange(1, span), np.full(order, span)]
-    lo, hi = x.min(axis=0), x.max(axis=0)
-    width = np.where(hi > lo, hi - lo, 1.0)        # a constant variable: at 0
-    z = (x - lo) / width * span
-    w = np.empty((n, p, bins))
-    for i in range(p):
-        w[:, i] = BSpline.design_matrix(z[:, i], knots, order - 1).toarray()
+    knots = torch.tensor(np.r_[np.zeros(order), np.arange(1, span),
+                               np.full(order, span)],
+                         dtype=x.dtype, device=x.device)
+    lo, hi = x.amin(dim=0), x.amax(dim=0)
+    width = torch.where(hi > lo, hi - lo, 1.0)   # a constant variable: at 0
+    z = ((x - lo) / width * span)[..., None]     # n x p x 1
+    # order 1: the interval [knots[i], knots[i + 1]) holding the value,
+    # among the non-empty ones order - 1 .. bins - 1; the far end of the
+    # domain belongs to the last
+    cell = torch.floor(z).clamp(0, span - 1).to(torch.long) + (order - 1)
+    w = torch.zeros((*z.shape[:2], bins + order - 1), dtype=x.dtype,
+                    device=x.device)
+    w.scatter_(2, cell, 1.0)
+    for k in range(2, order + 1):
+        i = torch.arange(bins + order - k, device=x.device)
+        lo_k, hi_k = knots[i], knots[i + k]
+        left_den, right_den = knots[i + k - 1] - lo_k, hi_k - knots[i + 1]
+        # (z - t_i) / (t_{i+k-1} - t_i) B_{i,k-1}
+        #   + (t_{i+k} - z) / (t_{i+k} - t_{i+1}) B_{i+1,k-1}, 0/0 as 0
+        left = torch.where(left_den > 0, (z - lo_k)
+                           / left_den.clamp_min(1e-30), 0.0) * w[..., :-1]
+        right = torch.where(right_den > 0, (hi_k - z)
+                            / right_den.clamp_min(1e-30), 0.0) * w[..., 1:]
+        w = left + right
     return w
 
 
@@ -176,14 +203,16 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
     dt = pick_dtype(dtype, dev)
     p, q = x.shape[1], y.shape[1]
 
-    wx = to_device(bspline_weights(x, bins, order).reshape(n, p * bins),
-                   dev, dt)
-    wy = wx if self_ else to_device(
-        bspline_weights(y, bins, order).reshape(n, q * bins), dev, dt)
+    # the weights computed on the device, all values at once
+    wx = _bspline_weights(to_device(x, dev, dt), bins, order).reshape(
+        n, p * bins)
+    wy = wx if self_ else _bspline_weights(to_device(y, dev, dt), bins,
+                                           order).reshape(n, q * bins)
 
     if tile is None:
         tile = max(1, int(np.sqrt((1 << 24) / bins**2)))
-    mi = torch.empty((p, q), dtype=torch.float64)
+    # kept on the device, so tiles do not each wait on a copy to the host
+    mi = torch.empty((p, q), dtype=dt, device=dev)
     for i0 in range(0, p, tile):
         i1 = min(i0 + tile, p)
         for j0 in range(0, q, tile):
@@ -193,8 +222,8 @@ def mutual_info(x, y=None, *, bins=10, order=3, tile=None, device=None,
             joint = (wx[:, i0 * bins:i1 * bins].T
                      @ wy[:, j0 * bins:j1 * bins]) / n
             joint = joint.reshape(i1 - i0, bins, j1 - j0, bins)
-            mi[i0:i1, j0:j1] = _mi_bits(joint).cpu().to(torch.float64)
-    mi = mi.numpy()
+            mi[i0:i1, j0:j1] = _mi_bits(joint)
+    mi = mi.cpu().to(torch.float64).numpy()
     # a constant variable shares no information: exactly 0, not rounding
     mi[np.ptp(x, axis=0) == 0, :] = 0.0
     mi[:, np.ptp(y, axis=0) == 0] = 0.0

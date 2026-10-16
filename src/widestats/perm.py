@@ -227,23 +227,29 @@ def cor_perm(x, y=None, *, B=1000, method="pearson", seed=None,
     if self_:
         test &= ~torch.eye(p, dtype=torch.bool, device=dev)
     r0 = torch.where(test, r0, torch.nan)
-    # what a permuted |r| must reach to count
-    bar = r0.abs() * (1 - eps)
-    counts = torch.zeros((p, q), dtype=torch.int64, device=dev)
-    maxima = torch.empty(B, dtype=torch.float64)
+    # what a permuted |r| must reach to count: never, for an entry that is
+    # no test
+    bar = torch.where(test, r0.abs() * (1 - eps), torch.inf)
+    # a constant column (NaN once standardised) contributes 0 to every
+    # permuted product rather than NaN, so no mask is needed per permutation
+    zx0, zy0 = torch.nan_to_num(zx, nan=0.0), torch.nan_to_num(zy, nan=0.0)
+    counts = torch.zeros((p, q), dtype=torch.int32, device=dev)
+    # kept on the device: a copy to the host per batch would wait for it
+    maxima = torch.empty(B, dtype=zx.dtype, device=dev)
 
     perms = _permutations(n, B, seed).to(dev)
     if batch is None:
-        # a batch holds a few b x p x q intermediates: 16M entries each
-        batch = max(1, (1 << 24) // max(1, p * q + n * q))
+        # a batch holds a few b x p x q intermediates: 32M entries each
+        batch = max(1, (1 << 25) // max(1, p * q + n * q))
     for b0 in range(0, B, batch):
         pb = perms[b0:b0 + batch]                       # b x n
-        rb = zx.T @ zy[pb]                              # b x p x q
-        # entries that are no test count as 0, so they neither reach a bar
-        # nor become a permutation's maximum
-        rb = torch.where(test, rb.abs(), 0)
-        counts += (rb >= bar).sum(dim=0)
-        maxima[b0:b0 + len(pb)] = rb.amax(dim=(1, 2)).cpu().to(torch.float64)
+        rb = torch.matmul(zx0.T, zy0[pb]).abs_()        # b x p x q
+        if self_:
+            # a variable with its own permuted self is no test
+            rb.diagonal(dim1=1, dim2=2).zero_()
+        counts += (rb >= bar).sum(dim=0, dtype=torch.int32)
+        maxima[b0:b0 + len(pb)] = rb.amax(dim=(1, 2))
+    maxima = maxima.cpu().to(torch.float64)
 
     r = r0.cpu().to(torch.float64).numpy()
     p_value = np.where(np.isnan(r), np.nan,

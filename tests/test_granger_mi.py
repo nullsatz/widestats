@@ -290,3 +290,34 @@ def test_mutual_info_nearly_empty_bin_is_finite_in_float32():
     want = ws.mutual_info(x, device="cpu", dtype="float64")
     assert np.all(np.isfinite(got))
     np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("lag", [1, 3, 5])
+@pytest.mark.parametrize("n", [500, 50_000])
+def test_orthonormal_columns_matches_householder(lag, n):
+    # Cholesky-QR2 against Householder QR on random-walk lag designs, whose
+    # columns are nearly collinear: the same projection, orthonormal Q
+    from widestats.granger import _orthonormal_columns
+    rng = np.random.default_rng(55)
+    walks = rng.standard_normal((n + lag, 3)).cumsum(axis=0)
+    a = np.stack([np.column_stack([np.ones(n)] + [w[lag - k:n + lag - k]
+                                                  for k in range(1, lag + 1)])
+                  for w in walks.T])
+    t = torch.tensor(a)
+    q = _orthonormal_columns(t)
+    qq = torch.linalg.qr(t).Q
+    eye = torch.eye(lag + 1, dtype=torch.float64).expand(3, -1, -1)
+    torch.testing.assert_close(q.transpose(1, 2) @ q, eye, atol=1e-12, rtol=0)
+    # same span: projecting a vector onto either basis gives the same result
+    v = torch.tensor(rng.standard_normal((3, n, 1)))
+    torch.testing.assert_close(q @ (q.transpose(1, 2) @ v),
+                               qq @ (qq.transpose(1, 2) @ v),
+                               atol=1e-9, rtol=0)
+
+
+def test_orthonormal_columns_nan_for_a_constant_design():
+    from widestats.granger import _orthonormal_columns
+    a = torch.ones((2, 10, 2), dtype=torch.float64)       # two equal columns
+    a[1, :, 1] = torch.arange(10.0)
+    q = _orthonormal_columns(a)
+    assert torch.isnan(q[0]).all() and torch.isfinite(q[1]).all()

@@ -60,17 +60,30 @@ class Granger:
 def _orthonormal_columns(a: torch.Tensor) -> torch.Tensor:
     """Orthonormalise the few columns of each matrix in a batch.
 
-    An orthonormal basis ``Q`` (``b x T x m``) of the columns of each
-    ``T x m`` matrix in `a`, by Householder QR, which returns the reduced Q:
-    on the device for CUDA (cuSOLVER) and the CPU (LAPACK); for other
-    devices on the CPU, Q returned to the device. (PyTorch's QR on Apple
-    GPUs builds a full ``T x T`` Q, gigabytes per matrix for long series,
-    and Gram-Schmidt, which avoids that, is much less accurate in
-    float32.) A constant series' design gives NaN, so its tests are NaN.
+    An orthonormal basis ``Q`` (``b x T x m``, same device and precision as
+    `a`) of the columns of each ``T x m`` matrix in `a`, by Cholesky-QR2 in
+    float64: ``R`` from the Cholesky factor of the small Gram matrix ``A'A``
+    and ``Q = A R^{-1}``, done twice. With ``m`` a handful of columns it is
+    all batched matrix products and tiny factorisations, much faster on a
+    GPU than a batched Householder QR (one small kernel per matrix), and in
+    float64 as accurate as one for condition numbers up to about 1e8,
+    which lag designs stay far below. Done on the device where it has
+    float64 (CUDA, the CPU), else on the CPU. A matrix whose Gram matrix
+    is not positive definite (a constant series) gives NaN.
     """
-    if a.device.type in ("cuda", "cpu"):
-        return torch.linalg.qr(a).Q
-    return torch.linalg.qr(a.cpu()).Q.to(a.device)
+    work = a.device if float64_solve_works(a.device.type) \
+        else torch.device("cpu")
+    q = a.to(work).to(torch.float64)
+    bad = torch.zeros(q.shape[0], dtype=torch.bool, device=work)
+    for _ in range(2):
+        chol, info = torch.linalg.cholesky_ex(q.transpose(1, 2) @ q)
+        bad |= info != 0
+        # Q R = A with R = chol', so Q = A R^{-1}: solve X R = A for X
+        q = torch.linalg.solve_triangular(chol.transpose(1, 2), q,
+                                          upper=True, left=False)
+    q[bad] = torch.nan
+    # to the precision first: Apple GPUs (mps) cannot hold float64
+    return q.to(a.dtype).to(a.device)
 
 
 def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
@@ -130,8 +143,8 @@ def granger(x, y=None, *, lag=1, tile=None, device=None, dtype=None) -> Granger:
 
     By the Frisch-Waugh theorem, ``RSS_r - RSS_u = g' G^{-1} g``, where,
     after projecting the effect's restricted design ``[1, own lags]`` (an
-    orthonormal basis ``Q_j`` of it: Householder QR on CUDA and the CPU,
-    Gram-Schmidt on Apple GPUs) out of everything,
+    orthonormal basis ``Q_j`` of it, by Cholesky-QR2 in float64) out of
+    everything,
     ``g = L_i' e_j`` is the cause's lags against the effect's residual and
     ``G = L_i' L_i - (Q_j' L_i)' (Q_j' L_i)`` the cause's residual
     cross-products. ``L' e`` for all pairs is one matrix product, and so is
