@@ -101,14 +101,18 @@ def bench_cor_pairs(quick):
             record("cor_pairs", size, "NumPy corrcoef + search", t)
         try:
             from corals.correlation.topk.default import cor_topk
-            # CorALS takes the fraction of all pairs to return (k), a
-            # threshold filtering them: asked for as many as pass 0.8
-            frac = 1.05 * len(got) / (p * (p - 1) / 2)
+            # CorALS returns a fraction k of all p x p entries, the
+            # diagonal and both orders of each pair included, filtered by
+            # the threshold: asked for enough to hold every pair over 0.8.
+            # Its default (n_jobs=None) was faster than n_jobs=8 here.
+            frac = 1.05 * (p + 2 * len(got)) / p**2
             t, res = once(lambda: cor_topk(x, k=frac, threshold=0.8,
                                             correlation_type="pearson"))
-            found = len(res[0])
-            record("cor_pairs", size, "CorALS cor_topk (threshold)", t,
-                   f"{found} vs {len(got)} pairs")
+            ii, jj = (np.asarray(v) for v in res[1])
+            off = ii != jj
+            pairs = set(zip(np.minimum(ii, jj)[off], np.maximum(ii, jj)[off]))
+            assert pairs == set(zip(got.i, got.j))
+            record("cor_pairs", size, "CorALS cor_topk", t)
         except Exception as e:                # baseline unavailable
             record("cor_pairs", size, "CorALS cor_topk (threshold)",
                    float("nan"), f"failed: {type(e).__name__}")
