@@ -1,8 +1,8 @@
 """Turn bench/results/results.csv into a markdown table of speedups.
 
-For each function and size: widestats on the GPU (float32, and float64 for
-Granger, its default on CUDA), widestats on the CPU, and the fastest CPU
-baseline, with the GPU's speedup over that baseline.
+For each function and size: the fastest standard CPU tool timed, widestats
+on the CPU (float64), and widestats on the GPU (float32; float64 for
+Granger, its default on CUDA), with the GPU's speedup over each.
 
     python bench/report.py [bench/results]
 """
@@ -32,9 +32,9 @@ def main(folder="bench/results"):
         t = float(r["seconds"])
         if t == t:                                       # not NaN
             cases[key][r["implementation"]] = t
-    out = ["| function | size | best CPU code | its time | widestats CPU "
-           "| widestats GPU | GPU speedup |",
-           "|---|---|---|---|---|---|---|"]
+    out = ["| function | size | standard CPU tool | its time | widestats CPU "
+           "| widestats GPU | GPU vs tool | GPU vs widestats CPU |",
+           "|---|---|---|---|---|---|---|---|"]
     for fn, size in order:
         c = cases[(fn, size)]
         gpu = c.get("widestats GPU float64" if fn == "granger"
@@ -46,8 +46,9 @@ def main(folder="bench/results"):
             speed = f"**{t / gpu:,.0f}×**"  # noqa: RUF001
         else:
             name, t, speed = "not run (too slow)", None, "—"
+        own = f"{cpu / gpu:,.1f}×"  # noqa: RUF001
         out.append(f"| `{fn}` | {size} | {name} | {fmt(t)} | {fmt(cpu)} "
-                   f"| {fmt(gpu)} | {speed} |")
+                   f"| {fmt(gpu)} | {speed} | {own} |")
     text = "\n".join(out) + "\n"
     (Path(folder) / "results.md").write_text(text)
     print(text)
