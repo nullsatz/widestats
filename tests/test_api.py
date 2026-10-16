@@ -333,3 +333,13 @@ def test_ttest_perm_exactly_constant_groups_in_maxt(dtype):
         # them apart and counts them as reaching it: conservative
         assert np.all(got.p_perm >= want_p)
         assert np.all(got.p_adjusted >= want_adj)
+
+
+def test_float64_solve_works():
+    # the CPU can always; an Apple GPU cannot (no float64); CUDA can
+    assert _core.float64_solve_works("cpu")
+    if torch.backends.mps.is_available():
+        assert not _core.float64_solve_works("mps")
+    if torch.cuda.is_available():
+        assert _core.float64_solve_works("cuda")
+    assert not _core.float64_solve_works("xla")

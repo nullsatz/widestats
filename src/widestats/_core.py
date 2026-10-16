@@ -55,6 +55,32 @@ def pick_device(device=None) -> torch.device:
 
 
 @functools.cache
+def float64_solve_works(kind: str) -> bool:
+    """Check that a device of this kind can solve batched systems in float64.
+
+    CUDA and the CPU can; Apple GPUs (mps) have neither float64 nor a
+    batched solve. Cached per kind.
+
+    Parameters
+    ----------
+    kind : str
+        A device type, such as ``"cuda"``, ``"mps"`` or ``"cpu"``.
+
+    Returns
+    -------
+    bool
+    """
+    try:
+        a = torch.eye(2, dtype=torch.float64, device=kind).expand(3, 2, 2)
+        b = torch.ones((3, 2, 1), dtype=torch.float64, device=kind)
+        sol, info = torch.linalg.solve_ex(a, b)
+        return bool((info == 0).all().item()) and bool(
+            torch.allclose(sol.cpu(), torch.ones((3, 2, 1), dtype=torch.float64)))
+    except (RuntimeError, TypeError, NotImplementedError):
+        return False
+
+
+@functools.cache
 def device_works(kind: str) -> bool:
     """Check that a tiny computation on a device of this kind succeeds.
 
