@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "widestats"
-version = "0.1.0"
+version = "0.1.1"
 description = "Statistics for wide data on a GPU, on PyTorch: strongest correlated pairs, permutation and maxT tests, Granger causality and mutual information of every pair"
 readme = "README.md"
 license = "GPL-3.0-or-later"
