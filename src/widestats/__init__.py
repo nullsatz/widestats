@@ -32,6 +32,7 @@ method. The README (https://github.com/nullsatz/widestats) has examples
 and benchmarks.
 """
 
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _version
 
 from ._core import pick_device
@@ -53,4 +54,7 @@ __all__ = [
     "ttest_perm",
 ]
 
-__version__ = _version("widestats")   # the one in pyproject.toml
+try:
+    __version__ = _version("widestats")   # the one in pyproject.toml
+except PackageNotFoundError:              # a source tree on the path
+    __version__ = "0+unknown"
