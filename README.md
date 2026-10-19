@@ -91,23 +91,24 @@ before its time counted.
 
 | job | size | fastest standard CPU tool | widestats GPU | speedup |
 |---|---|---|---|---|
-| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 8.4 s (NumPy, a tile at a time) | 0.17 s | **51×** |
-| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.3 s (NumPy, a tile at a time) | 0.038 s | **34×** |
-| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 11 s (vectorized NumPy) | 0.064 s | **165×** |
+| every pair with \|r\| ≥ 0.8 | 50,000 variables × 100 samples | 8.5 s (NumPy, a tile at a time) | 0.18 s | **48×** |
+| every pair with \|r\| ≥ 0.8 | 20,000 variables × 100 samples | 1.6 s (NumPy, a tile at a time) | 0.037 s | **43×** |
+| t test of every gene, 1,000 permutations, maxT | 20,000 genes × 100 samples | 10 s (vectorized NumPy) | 0.063 s | **163×** |
 | permutation test of every correlation, maxT | 3,000 × 3,000 variables, 1,000 permutations | 73 s (NumPy, one BLAS product per permutation) | 0.97 s | **75×** |
-| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 90 s (the same algorithm in NumPy and SciPy) | 1.1 s | **85×** |
-| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.060 s | **2,400×** |
+| B-spline mutual information, every pair | 6,000 variables × 1,000 samples | 76 s (the same algorithm in NumPy and SciPy) | 1.1 s | **71×** |
+| Granger test of every ordered pair | 300 series × 1,000 times | 2.4 min (statsmodels, pair by pair) | 0.021 s | **6,900×** |
 
 Not all of the speedup is the GPU. Run on the same 8 CPU cores, widestats
-is still 2–25× faster than the standard tools, because each job is a few
+is still 2–22× faster than the standard tools, because each job is a few
 large matrix products instead of a loop over pairs or permutations. The
-GPU multiplies that by a further 7–29×.
+GPU multiplies that by a further 7–31×.
 
-Granger gets almost nothing from the GPU. Its 2,400× is the algorithm: one
-batched computation in place of 89,700 separate regressions. It runs in
-float64, which a workstation GPU does little faster than a CPU, so the
-GPU takes 0.060 s and the CPU 0.073 s. At this size both are fixed
-overhead rather than arithmetic; at 1,000 series the GPU is 1.4× the CPU.
+Granger gets little from the GPU. Its 6,900× is the algorithm: one batched
+computation in place of 89,700 separate regressions, in float64, which a
+workstation GPU does little faster than a CPU. The GPU takes 0.021 s and
+the CPU 0.032 s, and at 1,000 series 0.13 s against 0.18 s: a 1.5× that
+is launch and transfer overhead on a job too small for the card, not
+arithmetic.
 
 CorALS, the CPU tool dedicated to finding the strongest pairs, took 6.5
 minutes at 50,000 variables. It is built to save memory rather than time;

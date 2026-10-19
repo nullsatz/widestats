@@ -576,3 +576,28 @@ def test_granger_hybrid_keeps_pairs_with_a_negative_fast_left(lag, scale):
     finally:
         gmod.FAST_SCORE_LIMIT = orig
     np.testing.assert_array_equal(got.f, want.f)
+
+
+def test_cond_triangular_bounds_and_singular():
+    # the Frobenius estimate is at least the 2-norm condition number and
+    # at most m times it; a wrong triangle flag would underestimate it;
+    # an exactly singular factor is infinite, not NaN
+    from widestats.granger import _cond_triangular
+    rng = np.random.default_rng(75)
+    for m in (3, 9):
+        # conditions from about 1e2 to 1e6: ill enough to matter, not so
+        # ill that the solve and the SVD themselves lose digits
+        a = torch.tensor(np.triu(0.3 * rng.standard_normal((4, m, m)), 1))
+        a.diagonal(dim1=1, dim2=2).copy_(torch.logspace(0, -4, m,
+                                                       dtype=a.dtype))
+        ok = torch.ones(4, dtype=torch.bool)
+        est = _cond_triangular(a, ok, upper=True)
+        true = torch.linalg.cond(a)
+        assert torch.all((est >= true * (1 - 1e-12)) & (est <= m * true))
+        assert torch.all(_cond_triangular(a, ok, upper=False) < est)
+    singular = torch.tensor([[[1.0, 2.0, 3.0], [0, 0, 1.0], [0, 0, 1.0]]],
+                            dtype=torch.float64)
+    assert torch.isinf(_cond_triangular(singular, torch.tensor([True]),
+                                        upper=True)).all()
+    assert torch.isinf(_cond_triangular(singular, torch.tensor([False]),
+                                        upper=True)).all()
