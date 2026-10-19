@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from scipy import stats
+from scipy import special
 
 from ._core import (
     as_matrix,
@@ -450,4 +450,6 @@ def granger(x, y=None, *, lag=1, tile=None, device=None) -> Granger:
     with np.errstate(invalid="ignore", divide="ignore"):
         rss_u = rss_r[None, :] - gain
         f = (gain / lag) / (rss_u / df2)
-    return Granger(f, stats.f.sf(f, lag, df2), lag, (lag, df2))
+    # the F distribution's upper tail directly (what stats.f.sf computes,
+    # without its per-call machinery: a million pairs is a visible cost)
+    return Granger(f, special.fdtrc(lag, df2, f), lag, (lag, df2))
