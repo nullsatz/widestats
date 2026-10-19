@@ -455,3 +455,99 @@ def test_granger_mixed_and_drifting_integrated_panels(panel, n, lag):
         assert got.f[i, j] == pytest.approx(want, rel=1e-4), (i, j)
         checked += 1
     assert checked > 0
+
+
+# --- the fast form and the hybrid --------------------------------------------
+
+def _granger_modes(x, lag, device="cpu"):
+    """F by the all-fast, all-explicit and hybrid forms of `_granger_core`."""
+    from widestats.granger import _granger_core
+    times = x.shape[0] - lag
+    df2 = times - 2 * lag - 1
+    out = {}
+    for mode in (True, False, None):
+        gain, rss_r, *_ = _granger_core(x, x, True, lag, None,
+                                        torch.device(device), fast=mode)
+        gain = np.clip(gain, 0, rss_r[None, :])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[mode] = (gain / lag) / ((rss_r[None, :] - gain) / df2)
+    return out
+
+
+@pytest.mark.parametrize("device", [d for d, t in DEVICES if t == "float64"])
+@pytest.mark.parametrize("kind", ["walk", "ar", "trend", "white"])
+def test_granger_fast_form_matches_explicit_on_ordinary_series(kind, device):
+    # the series the fast form takes every pair of: identical to the
+    # explicit residual lags to rounding, on each device with float64
+    rng = np.random.default_rng(70)
+    n = 5000
+    z = rng.standard_normal((n, 5))
+    if kind == "walk":
+        x = z.cumsum(axis=0)
+    elif kind == "ar":
+        x = np.zeros_like(z)
+        for t in range(1, n):
+            x[t] = 0.999 * x[t - 1] + z[t]
+    elif kind == "trend":
+        x = 0.01 * np.arange(n)[:, None] + z
+    else:
+        x = z
+    x[1:, 2] += 0.3 * x[:-1, 0]
+    f = _granger_modes(x, 3, device)
+    off = ~np.eye(5, dtype=bool)
+    np.testing.assert_allclose(f[True][off], f[False][off], rtol=1e-9)
+    np.testing.assert_allclose(f[None][off], f[False][off], rtol=1e-9)
+    want, _ = granger_ref(x[:, 0], x[:, 2], 3)
+    assert f[None][0, 2] == pytest.approx(want, rel=1e-8)
+
+
+def test_granger_hybrid_recomputes_where_the_fast_form_is_wrong():
+    # a cause that is the effect plus 1e-6 noise: little of its lags is
+    # left beside the effect's past, and the fast form's cancellation
+    # leaves a wrong F. The hybrid matches the explicit form anyway.
+    rng = np.random.default_rng(71)
+    e = rng.standard_normal(3000).cumsum()
+    x = np.column_stack([e, e + 1e-6 * rng.standard_normal(3000),
+                         rng.standard_normal(3000).cumsum()])
+    f = _granger_modes(x, 2)
+    assert not np.isclose(f[True][1, 0], f[False][1, 0], rtol=1e-4)
+    off = ~np.eye(3, dtype=bool)
+    np.testing.assert_allclose(f[None][off], f[False][off], rtol=1e-9)
+    want, _ = granger_ref(x[:, 1], x[:, 0], 2)
+    assert f[None][1, 0] == pytest.approx(want, rel=1e-6)
+
+
+def test_granger_hybrid_matches_explicit_on_integrated_panels():
+    # I(2) and I(3) series send most pairs down the explicit path, and the
+    # large-F factor matters for the drifting ones: the hybrid still
+    # agrees with the all-explicit form on every pair, NaN for NaN
+    rng = np.random.default_rng(72)
+    z = rng.standard_normal((3000, 4))
+    for x in [z.cumsum(axis=0).cumsum(axis=0),
+              (1 + z).cumsum(axis=0).cumsum(axis=0),
+              z.cumsum(axis=0).cumsum(axis=0).cumsum(axis=0)]:
+        for lag in (1, 4):
+            f = _granger_modes(x, lag)
+            off = ~np.eye(4, dtype=bool)
+            np.testing.assert_array_equal(np.isnan(f[None][off]),
+                                          np.isnan(f[False][off]))
+            ok = off & np.isfinite(f[False])
+            np.testing.assert_allclose(f[None][ok], f[False][ok], rtol=1e-9)
+
+
+def test_granger_hybrid_respects_the_score_limit(monkeypatch):
+    # with the limit at zero every pair is recomputed: the result is the
+    # explicit form's exactly; with it infinite, the fast form's
+    gmod = __import__("sys").modules["widestats.granger"]
+    # (off the diagonal: a series against itself is not a test, and its
+    # score is not a number)
+    rng = np.random.default_rng(73)
+    x = rng.standard_normal((500, 4)).cumsum(axis=0)
+    off = ~np.eye(4, dtype=bool)
+    f = _granger_modes(x, 2)
+    monkeypatch.setattr(gmod, "FAST_SCORE_LIMIT", -1.0)
+    np.testing.assert_array_equal(_granger_modes(x, 2)[None][off],
+                                  f[False][off])
+    monkeypatch.setattr(gmod, "FAST_SCORE_LIMIT", np.inf)
+    np.testing.assert_array_equal(_granger_modes(x, 2)[None][off],
+                                  f[True][off])

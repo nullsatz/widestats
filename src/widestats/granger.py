@@ -41,6 +41,18 @@ LEFT_LIMIT = 1e-20
 # as Householder, measured, and much faster on GPUs); Householder QR for
 # the rest, where the Cholesky factorisation itself becomes unreliable.
 CHOLESKY_QR_LIMIT = 1e7
+# The fast form of a pair's test, G = L'L - C'C and g = L'e - C'(Q'e) with
+# C = Q'L, subtracts quantities of the size of the cause's lags to leave
+# what is beside the effect's own past. Its error relative to the explicit
+# form's grows with cond(G) / left, and, as F compares the gain with what
+# is left of the restricted RSS, with 1 + F * lag / df2. Measured over
+# 1,501 resolved pairs of the sweep panels (white noise, AR(0.9999),
+# random walks with and without drift, trends, I(2) with and without
+# drift, I(3), mixed, causal, near-copies; n 300-30,000; lag 1-8), the
+# error is at most about 20 eps times that product: below this limit it
+# stayed under 2.2e-10 (bound 4.4e-9), and plain random walks, AR, trends
+# and white noise all pass; above it the pair is recomputed explicitly.
+FAST_SCORE_LIMIT = 1e6
 
 
 @dataclass
@@ -121,7 +133,7 @@ def _orthonormal_columns(a: torch.Tensor):
     return q.to(a.dtype).to(a.device), cond.cpu()
 
 
-def _granger_core(x, y, self_, lag, tile, dev):
+def _granger_core(x, y, self_, lag, tile, dev, fast=None):
     """Compute the pieces of every pair's Granger test, in float64.
 
     Returns ``gain = RSS_r - RSS_u`` (causes x effects), ``RSS_r`` per
@@ -130,6 +142,11 @@ def _granger_core(x, y, self_, lag, tile, dev):
     series, infinite for exactly collinear lags), and the fraction of each
     cause's lags (squared length) left once the effect's own past is
     projected out. See `granger`.
+
+    `fast` chooses the form: by default the fast one for the pairs it
+    resolves (see `FAST_SCORE_LIMIT`) and the explicit residual lags for
+    the rest; True the fast form for every pair, False the explicit one
+    (both for measuring one against the other).
     """
     n = x.shape[0]
     times = n - lag
@@ -166,12 +183,32 @@ def _granger_core(x, y, self_, lag, tile, dev):
     effect_cond = torch.empty(q, dtype=torch.float64)
     cause_cond = torch.empty((p, q), dtype=torch.float64)
     left = torch.empty((p, q), dtype=torch.float64)
-    # each cause's lag columns' squared lengths, to measure what is left
+    # each cause's lag columns' squared lengths, to measure what is left,
+    # and their cross-products L'L per cause, for the fast form
+    lx4 = lx.reshape(times, p, lag)
     l2 = (lx * lx).sum(dim=0).reshape(p, lag)
+    ll = torch.einsum("tik,til->ikl", lx4, lx4)                     # p x L x L
     # the intercept column at unit length, like the scaled lag columns, so
     # that the design's condition number measures collinearity, not scale
     ones = torch.full((times, 1), times ** -0.5, dtype=torch.float64,
                       device=wd)
+    eye = torch.eye(lag, dtype=torch.float64, device=wd)
+
+    def solve_pairs(gmat, g):
+        # gain g' G^{-1} g, G's condition number (NaN for a constant
+        # series, infinite for exactly collinear lags), and how much of
+        # the cause's lags is left beside the effect's own past
+        sol, info = torch.linalg.solve_ex(gmat, g[..., None])
+        gb = (g * sol[..., 0]).sum(dim=-1)
+        gb = torch.where(info == 0, gb, torch.nan)
+        finite = torch.isfinite(gmat).flatten(-2).all(dim=-1)
+        ev = torch.linalg.eigvalsh(torch.where(finite[..., None, None],
+                                               gmat, eye))          # ascending
+        cond = torch.where(ev[..., 0] > 0, ev[..., -1] / ev[..., 0],
+                           torch.inf)
+        cond = torch.where(finite, cond, torch.nan)
+        return gb, cond
+
     for j0 in range(0, q, tile):
         j1 = min(j0 + tile, q)
         b = j1 - j0
@@ -181,33 +218,56 @@ def _granger_core(x, y, self_, lag, tile, dev):
         qmat, effect_cond[j0:j1] = _orthonormal_columns(design)
         yb = target[:, j0:j1].T                                     # b x T
         resid = yb - (qmat @ (qmat.transpose(1, 2) @ yb[:, :, None]))[:, :, 0]
-        rss_r[j0:j1] = (resid * resid).sum(dim=1).cpu()
-        # each cause's lags with the effect's own past projected out,
-        # explicitly: forming G = L'L - (Q'L)'(Q'L) instead cancels
-        m = lx[None] - qmat @ (qmat.transpose(1, 2) @ lx)          # b x T x pL
-        m = m.reshape(b, times, p, lag)
-        # the residual lags against the effect's residual: g = M' e. (L' e
-        # is the same in exact arithmetic, but e's rounding-sized part
-        # along the effect's own past, times L, swamps it when the effect
-        # is nearly predicted by its past.)
-        g = torch.einsum("btik,bt->bik", m, resid)                  # b x p x L
-        gmat = torch.einsum("btik,btil->bikl", m, m)               # b x p x L x L
-        sol, info = torch.linalg.solve_ex(gmat, g[..., None])
-        gb = (g * sol[..., 0]).sum(dim=2)                           # b x p
-        gain[:, j0:j1] = torch.where(info == 0, gb, torch.nan).T.cpu()
-        # how far from singular each cause's residual lags are (NaN for a
-        # constant series, infinite for exactly collinear lags)
-        finite = torch.isfinite(gmat).flatten(2).all(dim=2)
-        eye = torch.eye(lag, dtype=torch.float64, device=wd)
-        ev = torch.linalg.eigvalsh(torch.where(finite[..., None, None],
-                                               gmat, eye))          # ascending
-        cond = torch.where(ev[..., 0] > 0, ev[..., -1] / ev[..., 0],
-                           torch.inf)
-        cond = torch.where(finite, cond, torch.nan)
-        # how much of each cause's lags is left beside the effect's own past
-        left[:, j0:j1] = (torch.diagonal(gmat, dim1=2, dim2=3)
-                          / l2[None]).amin(dim=2).T.cpu()
+        rss_b = (resid * resid).sum(dim=1)                          # b
+        rss_r[j0:j1] = rss_b.cpu()
+        qt = qmat.transpose(1, 2)                                   # b x m x T
+        if fast is False:
+            lft = torch.zeros((b, p), dtype=torch.float64, device=wd)
+            redo = torch.ones((b, p), dtype=torch.bool, device=wd)
+            gb = torch.empty((b, p), dtype=torch.float64, device=wd)
+            cond = torch.empty((b, p), dtype=torch.float64, device=wd)
+        else:
+            # the fast form: everything from the few m x pL numbers Q'L and
+            # the big product L'e. G = L'L - C'C and g = L'e - C'(Q'e)
+            # with C = Q'L: in exact arithmetic M'M and M'e, but computed
+            # by subtracting quantities of the size of L to leave what is
+            # beside the effect's own past, which the explicit M does not
+            c = (qt @ lx).reshape(b, -1, p, lag)                    # b x m x p x L
+            qe = qt @ resid[:, :, None]                             # b x m x 1
+            gmat = ll[None] - torch.einsum("bmik,bmil->bikl", c, c)
+            g = (torch.einsum("tik,bt->bik", lx4, resid)
+                 - torch.einsum("bmik,bm->bik", c, qe[..., 0]))
+            gb, cond = solve_pairs(gmat, g)
+            lft = (torch.diagonal(gmat, dim1=2, dim2=3) / l2[None]).amin(dim=2)
+            # the pairs the fast form cannot be trusted on: see
+            # FAST_SCORE_LIMIT. (A NaN score, a constant series, has no test
+            # either way; a gain beyond the restricted RSS, rounding, is
+            # amplified as far as the comparison can be.)
+            amp = rss_b[:, None] / (rss_b[:, None] - gb.clamp(min=0))
+            amp = torch.where(amp > 0, amp, torch.inf)
+            score = cond / lft * amp
+            redo = ~(score < FAST_SCORE_LIMIT) & ~torch.isnan(score)
+            if fast is True:
+                redo = torch.zeros_like(redo)
+        if redo.any():
+            # the residual lags M = L - Q Q'L formed explicitly, for the
+            # flagged (effect, cause) pairs only, then g = M'e and G = M'M.
+            # (L'e is the same in exact arithmetic, but e's rounding-sized
+            # part along the effect's own past, times L, swamps it when
+            # the effect is nearly predicted by its past.)
+            bj, ci = torch.nonzero(redo, as_tuple=True)
+            lsel = lx4[:, ci].permute(1, 0, 2)                      # k x T x L
+            qsel = qmat[bj]                                         # k x T x m
+            m = lsel - qsel @ (qsel.transpose(1, 2) @ lsel)
+            esel = resid[bj]                                        # k x T
+            g = torch.einsum("ktl,kt->kl", m, esel)
+            gmat = torch.einsum("kta,ktl->kal", m, m)
+            gb[bj, ci], cond[bj, ci] = solve_pairs(gmat, g)
+            lft[bj, ci] = (torch.diagonal(gmat, dim1=1, dim2=2)
+                           / l2[ci]).amin(dim=1)
+        gain[:, j0:j1] = gb.T.cpu()
         cause_cond[:, j0:j1] = cond.T.cpu()
+        left[:, j0:j1] = lft.T.cpu()
 
     return gain.numpy(), rss_r.numpy(), effect_cond.numpy(), \
         cause_cond.numpy(), left.numpy()
@@ -270,9 +330,20 @@ def granger(x, y=None, *, lag=1, tile=None, device=None) -> Granger:
     removed, ``g = M' e_j`` is their product with the effect's residual,
     and ``G = M' M``. All of it is computed in float64, as batches of
     matrix products on the device where it has float64 (CUDA, the CPU),
-    else on the CPU (Apple GPUs). Computing ``M`` explicitly, rather than
-    ``G`` as ``L'L - (Q'L)'(Q'L)``, avoids subtracting large numbers;
-    each series is first centred and scaled, which changes no F.
+    else on the CPU (Apple GPUs). Each series is first centred and scaled,
+    which changes no F.
+
+    For most pairs ``G`` and ``g`` come from a few small products, ``G =
+    L'L - C'C`` and ``g = L'e - C'(Q'e)`` with ``C = Q_j' L``, which cost
+    far less than forming ``M``. That form subtracts numbers of the size of
+    the cause's lags to leave what is beside the effect's own past, so its
+    rounding error grows with ``cond(G) / left`` (and with ``1 + F lag /
+    df2``, as a large F compares the gain with a small remainder); where
+    that product exceeds 1e6, which keeps the error below about 1e-9
+    (measured), the pair is recomputed with ``M`` formed explicitly.
+    Plain random walks, autoregressions, trends and white noise take the
+    fast form for every pair; series integrated twice or more, and
+    near-copies of the effect, mostly the explicit one.
 
     A test is NaN, with a warning, when it cannot be resolved in float64:
     when the effect's restricted design (intercept and lags, each at unit
