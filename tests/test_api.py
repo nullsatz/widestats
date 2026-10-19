@@ -359,4 +359,10 @@ def test_version_falls_back_when_not_installed(monkeypatch):
     reloaded = importlib.reload(widestats)
     assert reloaded.__version__ == "0+unknown"
     monkeypatch.undo()
-    assert importlib.reload(widestats).__version__ != "0+unknown"
+    # restored: the installed version, or the fallback where (a source
+    # tree on the path, as on a cluster) widestats is not installed
+    try:
+        want = md.version("widestats")
+    except md.PackageNotFoundError:
+        want = "0+unknown"
+    assert importlib.reload(widestats).__version__ == want
