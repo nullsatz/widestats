@@ -30,7 +30,9 @@ from ._core import (
 # without drift, trends, I(2) with and without drift, I(3), mixed panels;
 # n 300-30,000; lag 1-8): realistic series stay below 5e4 and 3e5 with
 # errors under 1e-8; within these limits every pair was within 1e-4;
-# beyond them errors reach 100%.
+# beyond them errors reach 100%. (The effect's, and a fast-form pair's,
+# is the Frobenius estimate ||A|| ||A^-1||, at most the number of columns
+# times the 2-norm one these were measured with: within the margins.)
 EFFECT_LIMIT = 1e10
 CAUSE_LIMIT = 1e12
 # A cause whose lags keep less than this fraction of their squared length
@@ -98,7 +100,8 @@ def _cond_triangular(r: torch.Tensor, ok: torch.Tensor, upper: bool):
     inv = torch.linalg.solve_triangular(safe, eye.expand_as(safe),
                                         upper=upper)
     cond = safe.norm(dim=(-2, -1)) * inv.norm(dim=(-2, -1))
-    return torch.where(ok, cond, torch.inf)
+    # an exactly singular R gives 0 * inf = NaN in the norm: infinite too
+    return torch.where(ok & torch.isfinite(cond), cond, torch.inf)
 
 
 def _orthonormal_columns(a: torch.Tensor):
@@ -135,7 +138,8 @@ def _orthonormal_columns(a: torch.Tensor):
         # Q R = A with R = chol', so Q = A R^{-1}: solve X R = A for X
         q = torch.linalg.solve_triangular(chol.transpose(1, 2), q,
                                           upper=True, left=False)
-    if bad.any():
+    bad = torch.nonzero(bad)[:, 0]          # one device-to-host sync
+    if bad.numel():
         # Householder for the ill-conditioned ones (a constant series' NaN
         # design stays NaN)
         qq, rr = torch.linalg.qr(a64[bad])
@@ -196,8 +200,9 @@ def _granger_core(x, y, self_, lag, tile, dev, fast=None):
         tile = max(1, (1 << 24) // max(1, (
             # the explicit form holds b x T x p*L residual lags
             times * p * lag if fast is False
-            # the fast one a few b x T x m, and C and G
-            else 4 * times * m + p * lag * (m + lag))))
+            # the fast one about six b x T x m (the design, Q and their
+            # intermediates), and C and G
+            else 6 * times * m + p * lag * (m + lag))))
     # (effects x causes) on the device, transposed and copied once at the end
     gain = torch.empty((q, p), dtype=torch.float64, device=wd)
     cause_cond = torch.empty((q, p), dtype=torch.float64, device=wd)
@@ -258,13 +263,11 @@ def _granger_core(x, y, self_, lag, tile, dev, fast=None):
             # the big product L'e. G = L'L - C'C and g = L'e - C'(Q'e)
             # with C = Q'L: in exact arithmetic M'M and M'e, but computed
             # by subtracting quantities of the size of L to leave what is
-            # beside the effect's own past, which the explicit M does not.
-            # Q'L for the whole tile is one product with a long inner
-            # dimension, which runs far better than a batch of thin ones
-            c = (qt.reshape(b * m, times) @ lx).reshape(b, m, p, lag)
+            # beside the effect's own past, which the explicit M does not
+            c = (qt @ lx).reshape(b, m, p, lag)                     # b x m x p x L
             qe = (qt @ resid[:, :, None])[:, :, 0]                  # b x m
             gmat = ll[None] - torch.einsum("bmik,bmil->bikl", c, c)
-            g = ((lx.T @ resid.T).T.reshape(b, p, lag)              # L'e
+            g = ((resid @ lx).reshape(b, p, lag)                    # L'e
                  - torch.einsum("bmik,bm->bik", c, qe))
             gb, cond = solve_pairs(gmat, g, exact=False)
             lft = (torch.diagonal(gmat, dim1=2, dim2=3) / l2[None]).amin(dim=2)
@@ -280,15 +283,16 @@ def _granger_core(x, y, self_, lag, tile, dev, fast=None):
             redo = ~(score < FAST_SCORE_LIMIT) & ~torch.isnan(score)
             if fast is True:
                 redo = torch.zeros_like(redo)
-        if redo.any():
+        bj, ci = torch.nonzero(redo, as_tuple=True)   # one sync
+        if bj.numel():
             # the residual lags M = L - Q Q'L formed explicitly, for the
             # flagged (effect, cause) pairs only, then g = M'e and G = M'M.
             # (L'e is the same in exact arithmetic, but e's rounding-sized
             # part along the effect's own past, times L, swamps it when
             # the effect is nearly predicted by its past.) In chunks of
-            # pairs, each holding k x T x (m + L).
-            bj, ci = torch.nonzero(redo, as_tuple=True)
-            chunk = max(1, (1 << 24) // max(1, times * (m + lag)))
+            # pairs, each holding about k x T x (m + 3L) with the
+            # intermediates.
+            chunk = max(1, (1 << 24) // max(1, times * (m + 3 * lag)))
             for k0 in range(0, bj.shape[0], chunk):
                 bk, ck = bj[k0:k0 + chunk], ci[k0:k0 + chunk]
                 lsel = lx4[:, ck].permute(1, 0, 2)                  # k x T x L
@@ -383,8 +387,9 @@ def granger(x, y=None, *, lag=1, tile=None, device=None) -> Granger:
 
     A test is NaN, with a warning, when it cannot be resolved in float64:
     when the effect's restricted design (intercept and lags, each at unit
-    length) has condition number above 1e10, or a cause's ``G`` above
-    1e12, or when less than 1e-20 of a cause's lags (in squared length) is
+    length) has condition number (estimated as ``||R|| ||R^-1||`` in the
+    Frobenius norm) above 1e10, or a cause's ``G`` above 1e12, or when
+    less than 1e-20 of a cause's lags (in squared length) is
     left beside the effect's own past (a cause that is, to rounding, a
     linear function of it). White noise, near-unit-root series, random
     walks with or without drift and trends stay far below (5e4 and 3e5 at
