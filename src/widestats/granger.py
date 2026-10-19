@@ -245,7 +245,9 @@ def _granger_core(x, y, self_, lag, tile, dev, fast=None):
             # amplified as far as the comparison can be.)
             amp = rss_b[:, None] / (rss_b[:, None] - gb.clamp(min=0))
             amp = torch.where(amp > 0, amp, torch.inf)
-            score = cond / lft * amp
+            # nothing left, or less than nothing (cancellation), is also
+            # unresolved: a negative left would make the score negative
+            score = torch.where(lft > 0, cond / lft * amp, torch.inf)
             redo = ~(score < FAST_SCORE_LIMIT) & ~torch.isnan(score)
             if fast is True:
                 redo = torch.zeros_like(redo)

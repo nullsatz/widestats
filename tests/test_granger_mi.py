@@ -496,7 +496,8 @@ def test_granger_fast_form_matches_explicit_on_ordinary_series(kind, device):
     f = _granger_modes(x, 3, device)
     off = ~np.eye(5, dtype=bool)
     np.testing.assert_allclose(f[True][off], f[False][off], rtol=1e-9)
-    np.testing.assert_allclose(f[None][off], f[False][off], rtol=1e-9)
+    # and the hybrid did take it: its numbers are the fast form's exactly
+    np.testing.assert_array_equal(f[None][off], f[True][off])
     want, _ = granger_ref(x[:, 0], x[:, 2], 3)
     assert f[None][0, 2] == pytest.approx(want, rel=1e-8)
 
@@ -518,9 +519,9 @@ def test_granger_hybrid_recomputes_where_the_fast_form_is_wrong():
 
 
 def test_granger_hybrid_matches_explicit_on_integrated_panels():
-    # I(2) and I(3) series send most pairs down the explicit path, and the
-    # large-F factor matters for the drifting ones: the hybrid still
-    # agrees with the all-explicit form on every pair, NaN for NaN
+    # I(2) and I(3) series send many pairs down the explicit path, and the
+    # large-F factor matters for the drifting ones: the hybrid agrees with
+    # the all-explicit form on every pair, NaN for NaN
     rng = np.random.default_rng(72)
     z = rng.standard_normal((3000, 4))
     for x in [z.cumsum(axis=0).cumsum(axis=0),
@@ -551,3 +552,27 @@ def test_granger_hybrid_respects_the_score_limit(monkeypatch):
     monkeypatch.setattr(gmod, "FAST_SCORE_LIMIT", np.inf)
     np.testing.assert_array_equal(_granger_modes(x, 2)[None][off],
                                   f[True][off])
+
+
+@pytest.mark.parametrize("lag,scale", [(1, 1e-8), (2, 1e-7), (2, 1e-8)])
+def test_granger_hybrid_keeps_pairs_with_a_negative_fast_left(lag, scale):
+    # a cause within 1e-7 to 1e-9 of the effect's scale: the fast form's
+    # left comes out slightly negative by cancellation, which once gave a
+    # negative score that passed the limit, so the pair was never
+    # recomputed and ended NaN where the explicit path has an answer
+    rng = np.random.default_rng(74)
+    e = rng.standard_normal(2000).cumsum()
+    x = np.column_stack([e, e + scale * rng.standard_normal(2000)])
+    f = _granger_modes(x, lag)
+    assert np.isfinite(f[False][1, 0]) and np.isfinite(f[False][0, 1])
+    np.testing.assert_array_equal(f[None][[0, 1], [1, 0]],
+                                  f[False][[0, 1], [1, 0]])
+    gmod = __import__("sys").modules["widestats.granger"]
+    got = ws.granger(x, lag=lag, device="cpu")
+    orig = gmod.FAST_SCORE_LIMIT
+    try:
+        gmod.FAST_SCORE_LIMIT = -1.0
+        want = ws.granger(x, lag=lag, device="cpu")
+    finally:
+        gmod.FAST_SCORE_LIMIT = orig
+    np.testing.assert_array_equal(got.f, want.f)
