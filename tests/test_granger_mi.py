@@ -585,9 +585,11 @@ def test_cond_triangular_bounds_and_singular():
     from widestats.granger import _cond_triangular
     rng = np.random.default_rng(75)
     for m in (3, 9):
-        a = torch.tensor(np.triu(rng.standard_normal((4, m, m))))
-        a.diagonal(dim1=1, dim2=2).mul_(torch.logspace(0, -6, m,
-                                                      dtype=a.dtype))
+        # conditions from about 1e2 to 1e6: ill enough to matter, not so
+        # ill that the solve and the SVD themselves lose digits
+        a = torch.tensor(np.triu(0.3 * rng.standard_normal((4, m, m)), 1))
+        a.diagonal(dim1=1, dim2=2).copy_(torch.logspace(0, -4, m,
+                                                       dtype=a.dtype))
         ok = torch.ones(4, dtype=torch.bool)
         est = _cond_triangular(a, ok, upper=True)
         true = torch.linalg.cond(a)
