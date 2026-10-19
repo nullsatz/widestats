@@ -343,3 +343,26 @@ def test_float64_solve_works():
     if torch.cuda.is_available():
         assert _core.float64_solve_works("cuda")
     assert not _core.float64_solve_works("xla")
+
+
+def test_version_falls_back_when_not_installed(monkeypatch):
+    # run from a source tree on PYTHONPATH, widestats has no metadata
+    import importlib
+    import importlib.metadata as md
+
+    import widestats
+
+    def missing(name):
+        raise md.PackageNotFoundError(name)
+
+    monkeypatch.setattr(md, "version", missing)
+    reloaded = importlib.reload(widestats)
+    assert reloaded.__version__ == "0+unknown"
+    monkeypatch.undo()
+    # restored: the installed version, or the fallback where (a source
+    # tree on the path, as on a cluster) widestats is not installed
+    try:
+        want = md.version("widestats")
+    except md.PackageNotFoundError:
+        want = "0+unknown"
+    assert importlib.reload(widestats).__version__ == want
